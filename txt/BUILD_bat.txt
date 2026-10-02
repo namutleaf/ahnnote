@@ -16,17 +16,38 @@ if not exist "AhnNote.cs" (
     exit /b 1
 )
 
-echo Building AHNNOTE.exe ...
-"%CSC%" /nologo /target:winexe /codepage:65001 /optimize+ /out:AHNNOTE.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll AhnNote.cs
+set OPTS=/nologo /target:winexe /codepage:65001 /optimize+ /out:AHNNOTE.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll
 
-if errorlevel 1 (
-    echo.
-    echo [FAIL] Build failed. Check the messages above.
-    pause
-    exit /b 1
+echo [1/3] Building AHNNOTE.exe ...
+"%CSC%" %OPTS% AhnNote.cs
+if errorlevel 1 goto fail
+
+echo [2/3] Making icon ...
+if exist AHNNOTE.ico del AHNNOTE.ico
+start "" /wait AHNNOTE.exe /makeicon
+if not exist AHNNOTE.ico (
+    echo Icon was not created. AHNNOTE.exe is built without icon.
+    goto ok
 )
 
+echo [3/3] Adding icon ...
+"%CSC%" %OPTS% /win32icon:AHNNOTE.ico AhnNote.cs
+if errorlevel 1 (
+    echo Icon step failed. Building without icon.
+    "%CSC%" %OPTS% AhnNote.cs
+    if errorlevel 1 goto fail
+)
+
+:ok
 echo.
 echo [OK] AHNNOTE.exe created.
 echo Notes are saved in the AhnNoteData folder next to AHNNOTE.exe
 pause
+exit /b 0
+
+:fail
+echo.
+echo [FAIL] Build failed. Check the messages above.
+echo If AHNNOTE is running, close it and try again.
+pause
+exit /b 1

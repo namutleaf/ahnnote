@@ -5,6 +5,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -19,8 +21,14 @@ namespace AhnNote
         static extern bool SetProcessDPIAware();
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            // BUILD.BAT 이 아이콘 파일을 만들 때 사용
+            if (args.Length > 0 && args[0].ToLower() == "/makeicon")
+            {
+                try { AppIcon.WriteIco(Path.Combine(Application.StartupPath, "AHNNOTE.ico")); } catch { }
+                return;
+            }
             try { SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -75,7 +83,6 @@ namespace AhnNote
         static readonly string[] RULE_FROM = { "<=>", "←>", "[ ]", "[]", "[x]", "[X]", "[v]", "()", "->", "<-", "=>" };
         static readonly string[] RULE_TO = { "⇔", "↔", BOX, BOX, BOX_ON, BOX_ON, BOX_ON, "○", "→", "←", "⇒" };
 
-        static readonly Color ACCENT = Color.FromArgb(0, 103, 192);
         static readonly Color[] NB_COLORS = {
             Color.FromArgb(0, 103, 192), Color.FromArgb(11, 107, 203), Color.FromArgb(15, 123, 108),
             Color.FromArgb(217, 115, 13), Color.FromArgb(224, 62, 62), Color.FromArgb(105, 64, 165),
@@ -89,7 +96,12 @@ namespace AhnNote
         List<Button> sideAdds = new List<Button>();
         Label logo;
         Panel titleLine;
-        ToolStripButton darkBtn;
+        ToolStripButton darkBtn, topBtn;
+        bool topMost = false;
+        int moleBest = 0;
+        Dictionary<string, string> nbColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Timer holdTimer;
+        MoleGame mole;
         Dictionary<int, int> darkToLight = new Dictionary<int, int>();
 
         // ---------- Win32 ----------
@@ -180,6 +192,13 @@ namespace AhnNote
             logo.Height = Px(46);
             logo.TextAlign = ContentAlignment.MiddleLeft;
             logo.Font = new Font(FONT_NAME, 14f, FontStyle.Bold);
+            logo.MouseDown += new MouseEventHandler(Logo_MouseDown);
+            logo.MouseUp += new MouseEventHandler(Logo_MouseUp);
+            logo.MouseMove += new MouseEventHandler(Logo_MouseMove);
+            logo.MouseLeave += new EventHandler(Logo_MouseLeave);
+            holdTimer = new Timer();
+            holdTimer.Interval = 5000;
+            holdTimer.Tick += new EventHandler(HoldTimer_Tick);
             nbPanel.Controls.Add(logo);
             split1.Panel1.Controls.Add(nbPanel);
             split1.Panel2.Controls.Add(split2);
@@ -230,7 +249,7 @@ namespace AhnNote
 
             dateLabel = new Label();
             dateLabel.Dock = DockStyle.Top;
-            dateLabel.Height = Px(34);
+            dateLabel.Height = Px(50);
             dateLabel.TextAlign = ContentAlignment.MiddleLeft;
 
             pagePanel = new Panel();
@@ -248,10 +267,12 @@ namespace AhnNote
             nbList = MakeList();
             nbList.SelectedIndexChanged += new EventHandler(NbList_SelectedIndexChanged);
             nbList.KeyDown += new KeyEventHandler(NbList_KeyDown);
+            nbList.MouseDoubleClick += new MouseEventHandler(NbList_DoubleClick);
 
             pgList = MakeList();
             pgList.SelectedIndexChanged += new EventHandler(PgList_SelectedIndexChanged);
             pgList.KeyDown += new KeyEventHandler(PgList_KeyDown);
+            pgList.MouseDoubleClick += new MouseEventHandler(PgList_DoubleClick);
         }
 
         ListBox MakeList()
@@ -387,6 +408,12 @@ namespace AhnNote
             darkBtn.Alignment = ToolStripItemAlignment.Right;
             darkBtn.Click += new EventHandler(Dark_Click);
             tool.Items.Add(darkBtn);
+
+            topBtn = new ToolStripButton("항상 위");
+            topBtn.ToolTipText = "항상 위에 표시 (Ctrl+Shift+T)";
+            topBtn.Alignment = ToolStripItemAlignment.Right;
+            topBtn.Click += new EventHandler(Top_Click);
+            tool.Items.Add(topBtn);
         }
 
         ToolStripButton AddBtn(string text, string tip, EventHandler h)
@@ -439,20 +466,7 @@ namespace AhnNote
 
         Icon MakeIcon()
         {
-            try
-            {
-                Bitmap b = new Bitmap(32, 32);
-                using (Graphics g = Graphics.FromImage(b))
-                {
-                    g.Clear(ACCENT);
-                    using (Font f = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Pixel))
-                    {
-                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-                        g.DrawString("A", f, Brushes.White, 8, 5);
-                    }
-                }
-                return Icon.FromHandle(b.GetHicon());
-            }
+            try { return Icon.FromHandle(AppIcon.DrawA(32).GetHicon()); }
             catch { return null; }
         }
 
@@ -476,6 +490,17 @@ namespace AhnNote
             nbMenu.Items.Add("이름 바꾸기 (F2)", null, new EventHandler(RenameNotebook_Click));
             nbMenu.Items.Add("위로 이동 (Alt+↑)", null, new EventHandler(NbUp_Click));
             nbMenu.Items.Add("아래로 이동 (Alt+↓)", null, new EventHandler(NbDown_Click));
+            ToolStripMenuItem colorMenu = new ToolStripMenuItem("색 바꾸기");
+            Color[] nc = { Color.FromArgb(0, 103, 192), Color.FromArgb(0, 153, 214), Color.FromArgb(0, 137, 123), Color.FromArgb(56, 142, 60),
+                           Color.FromArgb(230, 170, 0), Color.FromArgb(217, 115, 13), Color.FromArgb(224, 62, 62), Color.FromArgb(194, 24, 91),
+                           Color.FromArgb(105, 64, 165), Color.FromArgb(120, 120, 120) };
+            string[] nn = { "파랑", "하늘", "청록", "초록", "노랑", "주황", "빨강", "분홍", "보라", "회색" };
+            AddColorItems(colorMenu, nc, nn, new EventHandler(NbColor_Click), true);
+            ToolStripMenuItem autoColor = new ToolStripMenuItem("자동 색");
+            autoColor.Tag = Color.Empty;
+            autoColor.Click += new EventHandler(NbColor_Click);
+            colorMenu.DropDownItems.Add(autoColor);
+            nbMenu.Items.Add(colorMenu);
             nbMenu.Items.Add(new ToolStripSeparator());
             nbMenu.Items.Add("삭제 (Del)", null, new EventHandler(DeleteNotebook_Click));
             nbList.ContextMenuStrip = nbMenu;
@@ -589,6 +614,7 @@ namespace AhnNote
                 case Keys.Control | Keys.H: ShowFind(true); return true;
                 case Keys.F3: FindAgain(true); return true;
                 case Keys.Control | Keys.Shift | Keys.D: ToggleDark(); return true;
+                case Keys.Control | Keys.Shift | Keys.T: ToggleTop(); return true;
                 case Keys.Shift | Keys.F3: FindAgain(false); return true;
             }
 
@@ -734,7 +760,8 @@ namespace AhnNote
                 if (n == TRASH || n.StartsWith(".") || n.StartsWith("_")) continue;
                 actual.Add(n);
             }
-            nbOrder = MergeOrder(ReadMeta(NbMetaFile(), null), actual);
+            nbColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            nbOrder = MergeOrder(ReadMeta(NbMetaFile(), nbColors), actual);
         }
 
         void LoadPages(string nb)
@@ -744,7 +771,7 @@ namespace AhnNote
             pgOrder = MergeOrder(meta, PageFiles(nb));
         }
 
-        void SaveNbMeta() { WriteMeta(NbMetaFile(), nbOrder, null); }
+        void SaveNbMeta() { WriteMeta(NbMetaFile(), nbOrder, nbColors); }
         void SavePgMeta() { if (curNotebook != null) WriteMeta(PgMetaFile(curNotebook), pgOrder, pgBg); }
 
         void SaveState()
@@ -818,7 +845,7 @@ namespace AhnNote
             if (lb == nbList)
             {
                 int d = Px(10);
-                Color c = NB_COLORS[e.Index % NB_COLORS.Length];
+                Color c = NbColor(e.Index);
                 e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                 using (SolidBrush b = new SolidBrush(c))
                     e.Graphics.FillRectangle(b, x, e.Bounds.Y + (e.Bounds.Height - d) / 2, d, d);
@@ -929,6 +956,8 @@ namespace AhnNote
             try { MoveDir(NbDir(old), NbDir(name)); }
             catch (Exception ex) { MessageBox.Show(this, "이름을 바꿀 수 없습니다.\n" + ex.Message, "AHNNOTE"); return; }
             nbOrder[idx] = name;
+            string col;
+            if (nbColors.TryGetValue(old, out col)) { nbColors.Remove(old); nbColors[name] = col; }
             SaveNbMeta();
             if (curNotebook == old) curNotebook = name;
             FillList(nbList, nbOrder, name);
@@ -949,6 +978,7 @@ namespace AhnNote
             curNotebook = null;
             curPage = null;
             nbOrder.RemoveAt(idx);
+            nbColors.Remove(nb);
             if (nbOrder.Count == 0)
             {
                 Directory.CreateDirectory(NbDir("내 노트북"));
@@ -1014,8 +1044,7 @@ namespace AhnNote
             ApplyBgColor(bg);
 
             titleBox.Text = pg;
-            try { dateLabel.Text = File.GetCreationTime(path).ToString("yyyy년 M월 d일 dddd  tt h:mm"); }
-            catch { dateLabel.Text = ""; }
+            UpdateDateLabel();
 
             ed.Modified = false;
             dirty = false;
@@ -1035,11 +1064,14 @@ namespace AhnNote
             {
                 if (!dark) ed.SaveFile(tmp, RichTextBoxStreamType.RichText);
                 else File.WriteAllText(tmp, MapColorTable(ed.Rtf, false), Latin1());
+                DateTime created = File.Exists(path) ? File.GetCreationTime(path) : DateTime.Now;
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(tmp, path);
+                try { File.SetCreationTime(path, created); } catch { }
                 dirty = false;
                 ed.Modified = false;
                 lastSaved = DateTime.Now.ToString("HH:mm:ss");
+                UpdateDateLabel();
             }
             catch (Exception ex)
             {
@@ -1223,14 +1255,23 @@ namespace AhnNote
                 string f = Path.Combine(dataDir, "_settings.txt");
                 if (!File.Exists(f)) return;
                 foreach (string line in File.ReadAllLines(f, Encoding.UTF8))
-                    if (line.Trim() == "dark=1") dark = true;
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq < 0) continue;
+                    string k = line.Substring(0, eq).Trim();
+                    string v = line.Substring(eq + 1).Trim();
+                    if (k == "dark") dark = (v == "1");
+                    else if (k == "top") topMost = (v == "1");
+                    else if (k == "molebest") int.TryParse(v, out moleBest);
+                }
             }
             catch { }
         }
 
         void SaveSettings()
         {
-            try { File.WriteAllText(Path.Combine(dataDir, "_settings.txt"), dark ? "dark=1\r\n" : "dark=0\r\n", Encoding.UTF8); }
+            string t = "dark=" + (dark ? "1" : "0") + "\r\n" + "top=" + (topMost ? "1" : "0") + "\r\n" + "molebest=" + moleBest + "\r\n";
+            try { File.WriteAllText(Path.Combine(dataDir, "_settings.txt"), t, Encoding.UTF8); }
             catch { }
         }
 
@@ -1299,6 +1340,8 @@ namespace AhnNote
             sizeBox.ComboBox.BackColor = dark ? cList : Color.White;
             sizeBox.ComboBox.ForeColor = cText;
             darkBtn.Checked = dark;
+            topBtn.Checked = topMost;
+            TopMost = topMost;
             darkBtn.Text = dark ? "\u25D1 라이트 모드" : "\u25D0 다크 모드";
 
             Skin.SetDark(dark);
@@ -1470,6 +1513,116 @@ namespace AhnNote
             cf.szFaceName = "";
             SendCharFormat(ed.Handle, EM_GETCHARFORMAT, (IntPtr)SCF_SELECTION, ref cf);
             return cf;
+        }
+
+        // ================= 노트북 색 / 항상 위 / 날짜 / 이스터에그 =================
+
+        Color NbColor(int index)
+        {
+            if (index >= 0 && index < nbOrder.Count)
+            {
+                string v;
+                int argb;
+                if (nbColors.TryGetValue(nbOrder[index], out v) && int.TryParse(v, out argb)) return Color.FromArgb(argb);
+            }
+            return NB_COLORS[Math.Max(0, index) % NB_COLORS.Length];
+        }
+
+        void NbColor_Click(object sender, EventArgs e)
+        {
+            int idx = nbList.SelectedIndex;
+            if (idx < 0) return;
+            string nb = nbOrder[idx];
+            object tag = ((ToolStripItem)sender).Tag;
+            if (tag is Color && ((Color)tag).IsEmpty) nbColors.Remove(nb);
+            else if (tag is Color) nbColors[nb] = ((Color)tag).ToArgb().ToString();
+            else
+            {
+                using (ColorDialog cd = new ColorDialog())
+                {
+                    cd.FullOpen = true;
+                    cd.Color = NbColor(idx);
+                    if (cd.ShowDialog(this) != DialogResult.OK) return;
+                    nbColors[nb] = cd.Color.ToArgb().ToString();
+                }
+            }
+            SaveNbMeta();
+            nbList.Invalidate();
+        }
+
+        void ToggleTop()
+        {
+            topMost = !topMost;
+            TopMost = topMost;
+            topBtn.Checked = topMost;
+            SaveSettings();
+            stLeft.Text = topMost ? "항상 위에 표시: 켜짐" : "항상 위에 표시: 꺼짐";
+        }
+
+        void Top_Click(object sender, EventArgs e) { ToggleTop(); }
+
+        void UpdateDateLabel()
+        {
+            if (curNotebook == null || curPage == null) { dateLabel.Text = ""; return; }
+            try
+            {
+                string path = PagePath(curNotebook, curPage);
+                DateTime c = File.GetCreationTime(path);
+                DateTime m = File.GetLastWriteTime(path);
+                dateLabel.Text = c.ToString("yyyy년 M월 d일 dddd  tt h:mm") + "\n(최종 수정: " + m.ToString("yyyy년 M월 d일  tt h:mm") + ")";
+            }
+            catch { dateLabel.Text = ""; }
+        }
+
+        void NbList_DoubleClick(object sender, MouseEventArgs e)
+        {
+            if (nbList.IndexFromPoint(e.Location) >= 0) RenameNotebook();
+        }
+
+        void PgList_DoubleClick(object sender, MouseEventArgs e)
+        {
+            if (pgList.IndexFromPoint(e.Location) < 0 || curPage == null) return;
+            string name = InputDialog.Ask(this, "페이지 이름 바꾸기", "새 이름:", curPage);
+            if (name == null) return;
+            titleBox.Text = name;
+            CommitTitle();
+        }
+
+        // 로고를 5초 동안 누르고 있으면 두더지 게임
+        void Logo_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            holdTimer.Stop();
+            holdTimer.Start();
+        }
+
+        void Logo_MouseUp(object sender, MouseEventArgs e) { holdTimer.Stop(); }
+        void Logo_MouseLeave(object sender, EventArgs e) { holdTimer.Stop(); }
+
+        void Logo_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (holdTimer.Enabled && !logo.ClientRectangle.Contains(e.Location)) holdTimer.Stop();
+        }
+
+        void HoldTimer_Tick(object sender, EventArgs e)
+        {
+            holdTimer.Stop();
+            if (mole != null && !mole.IsDisposed) { mole.Activate(); return; }
+            mole = new MoleGame(moleBest, S);
+            mole.FormClosed += new FormClosedEventHandler(Mole_Closed);
+            mole.StartPosition = FormStartPosition.Manual;
+            mole.Location = new Point(Left + (Width - mole.Width) / 2, Top + (Height - mole.Height) / 2);
+            mole.Show(this);
+        }
+
+        void Mole_Closed(object sender, FormClosedEventArgs e)
+        {
+            if (mole != null && mole.Best > moleBest)
+            {
+                moleBest = mole.Best;
+                SaveSettings();
+            }
+            mole = null;
         }
 
         // ================= 편집기 =================
@@ -1913,7 +2066,7 @@ namespace AhnNote
             AddLine("Ctrl+A 모두 선택,  Ctrl+C 복사,  Ctrl+X 잘라내기,  Ctrl+V 붙여넣기,  Ctrl+Shift+V 텍스트만 붙여넣기");
             AddLine("Ctrl+Z 실행 취소,  Ctrl+Y 다시 실행,  Ctrl+S 저장");
             AddLine("Ctrl+N 새 페이지,  Ctrl+Shift+N 새 노트북,  F2 이름 바꾸기,  Alt+↑↓ 순서 바꾸기");
-            AddLine("Ctrl+마우스 휠 확대/축소,  Ctrl+0 원래 크기,  Ctrl+Shift+D 다크 모드");
+            AddLine("Ctrl+마우스 휠 확대/축소,  Ctrl+0 원래 크기,  Ctrl+Shift+D 다크 모드,  Ctrl+Shift+T 항상 위");
             AddLine("");
             AddText("자동 변환 (입력하면 바로 바뀝니다)\n", 16f, FontStyle.Bold, Color.Black, none);
             AddLine("[]  →  체크박스,   [x]  →  체크됨,   ()  →  ○");
@@ -2453,6 +2606,683 @@ namespace AhnNote
                 if (f.ShowDialog(owner) == DialogResult.OK) return tb.Text;
                 return null;
             }
+        }
+    }
+
+    // ================= 앱 아이콘 (파란 A) =================
+
+    public static class AppIcon
+    {
+        static readonly Color ACCENT = Color.FromArgb(0, 103, 192);
+
+        public static Bitmap DrawA(int size)
+        {
+            Bitmap b = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                int r = Math.Max(2, size / 5);
+                using (GraphicsPath path = new GraphicsPath())
+                {
+                    path.AddArc(0, 0, r * 2, r * 2, 180, 90);
+                    path.AddArc(size - r * 2 - 1, 0, r * 2, r * 2, 270, 90);
+                    path.AddArc(size - r * 2 - 1, size - r * 2 - 1, r * 2, r * 2, 0, 90);
+                    path.AddArc(0, size - r * 2 - 1, r * 2, r * 2, 90, 90);
+                    path.CloseFigure();
+                    using (SolidBrush br = new SolidBrush(ACCENT)) g.FillPath(br, path);
+                }
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                using (Font f = new Font("Segoe UI", size * 0.62f, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (StringFormat sf = new StringFormat())
+                {
+                    sf.Alignment = StringAlignment.Center;
+                    sf.LineAlignment = StringAlignment.Center;
+                    g.DrawString("A", f, Brushes.White, new RectangleF(0, size * 0.04f, size, size), sf);
+                }
+            }
+            return b;
+        }
+
+        // 여러 크기가 들어간 .ico 파일 만들기 (256 은 PNG, 나머지는 BMP)
+        public static void WriteIco(string path)
+        {
+            int[] sizes = { 16, 24, 32, 48, 256 };
+            List<byte[]> imgs = new List<byte[]>();
+            foreach (int s in sizes)
+            {
+                using (Bitmap b = DrawA(s))
+                    imgs.Add(s >= 256 ? PngBytes(b) : DibBytes(b));
+            }
+            using (FileStream fs = new FileStream(path, FileMode.Create))
+            using (BinaryWriter w = new BinaryWriter(fs))
+            {
+                w.Write((short)0);
+                w.Write((short)1);
+                w.Write((short)sizes.Length);
+                int offset = 6 + 16 * sizes.Length;
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    int s = sizes[i];
+                    w.Write((byte)(s >= 256 ? 0 : s));
+                    w.Write((byte)(s >= 256 ? 0 : s));
+                    w.Write((byte)0);
+                    w.Write((byte)0);
+                    w.Write((short)1);
+                    w.Write((short)32);
+                    w.Write(imgs[i].Length);
+                    w.Write(offset);
+                    offset += imgs[i].Length;
+                }
+                foreach (byte[] img in imgs) w.Write(img);
+            }
+        }
+
+        static byte[] PngBytes(Bitmap b)
+        {
+            using (MemoryStream ms = new MemoryStream())
+            {
+                b.Save(ms, ImageFormat.Png);
+                return ms.ToArray();
+            }
+        }
+
+        static byte[] DibBytes(Bitmap b)
+        {
+            int s = b.Width;
+            int maskStride = ((s + 31) / 32) * 4;
+            using (MemoryStream ms = new MemoryStream())
+            using (BinaryWriter w = new BinaryWriter(ms))
+            {
+                w.Write(40);
+                w.Write(s);
+                w.Write(s * 2);
+                w.Write((short)1);
+                w.Write((short)32);
+                w.Write(0);
+                w.Write(s * s * 4 + maskStride * s);
+                w.Write(0);
+                w.Write(0);
+                w.Write(0);
+                w.Write(0);
+                for (int y = s - 1; y >= 0; y--)
+                {
+                    for (int x = 0; x < s; x++)
+                    {
+                        Color c = b.GetPixel(x, y);
+                        w.Write(c.B);
+                        w.Write(c.G);
+                        w.Write(c.R);
+                        w.Write(c.A);
+                    }
+                }
+                w.Write(new byte[maskStride * s]);
+                w.Flush();
+                return ms.ToArray();
+            }
+        }
+    }
+
+    // ================= 이스터에그: 두더지 잡기 =================
+
+    public class MoleGame : Form
+    {
+        // 화면 (도트 150 x 210 을 2배 이상으로 키워서 그림)
+        const int W = 150;
+        const int H = 210;
+
+        // 단계 설정: 1단계 아주 쉬움, 2단계 중간, 3단계 어려움
+        static readonly int[] STAGE_COUNT = { 6, 8, 10 };        // 두더지 수
+        static readonly int[] STAGE_SPAWN = { 1300, 750, 480 };  // 다음 두더지까지 (ms)
+        static readonly int[] STAGE_SHOW = { 1200, 1000, 700 };  // 보이는 시간 (ms)
+        static readonly string[] STAGE_NAME = { "EASY", "NORMAL", "HARD" };
+        const int UP_MS = 120;
+        const int HIT_MS = 250;
+        const int INTRO_MS = 1200;
+
+        const int ST_TITLE = 0;
+        const int ST_INTRO = 1;
+        const int ST_PLAY = 2;
+        const int ST_RESULT = 3;
+
+        static readonly string[] MOLE = {
+            "..BBBBBBBB..", ".BBBBBBBBBB.", "BBBKBBBBKBBB", "BBBKBBBBKBBB",
+            "BBBBBNNBBBBB", "BBBBNNNNBBBB", "BBBBBBBBBBBB", ".BBBBBBBBBB." };
+        static readonly string[] MOLE_HIT = {
+            "..BBBBBBBB..", ".BBBBBBBBBB.", "BBKBKBBKBKBB", "BBBKBBBBKBBB",
+            "BBBBBNNBBBBB", "BBBBNNNNBBBB", "BBBBBBBBBBBB", ".BBBBBBBBBB." };
+        static readonly string[] CROWN = { "Y.Y.Y", "YYYYY", "YYYYY" };
+        static readonly string[] FACE = {
+            "....KKKKKKKK....", "..KKBBBBBBBBKK..", ".KBBBBBBBBBBBBK.", ".KBBBBBBBBBBBBK.",
+            "KBBBBBBBBBBBBBBK", "KBBBKKBBBBKKBBBK", "KBBBKKBBBBKKBBBK", "KBBBBBBBBBBBBBBK",
+            "KBBBBLLLLLLBBBBK", "KBBBLLLNNLLLBBBK", "KBBBLLNNNNLLBBBK", "KBBBBLLWWLLBBBBK",
+            ".KBBBBBBBBBBBBK.", ".KBBBBBBBBBBBBK.", "..KKBBBBBBBBKK..", "....KKKKKKKK...." };
+
+        static readonly Color C_GRASS = Color.FromArgb(95, 160, 70);
+        static readonly Color C_GRASS2 = Color.FromArgb(86, 149, 61);
+        static readonly Color C_TUFT = Color.FromArgb(120, 189, 90);
+        static readonly Color C_DIRT = Color.FromArgb(122, 75, 36);
+        static readonly Color C_DIRTD = Color.FromArgb(63, 37, 18);
+        static readonly Color C_DIRTL = Color.FromArgb(165, 108, 52);
+        static readonly Color C_MOLE = Color.FromArgb(155, 106, 59);
+        static readonly Color C_SNOUT = Color.FromArgb(201, 154, 104);
+        static readonly Color C_NOSE = Color.FromArgb(240, 138, 160);
+        static readonly Color C_INK = Color.FromArgb(28, 20, 16);
+        static readonly Color C_HUD = Color.FromArgb(58, 38, 22);
+        static readonly Color C_GOLD = Color.FromArgb(255, 210, 63);
+        static readonly Color C_RED = Color.FromArgb(228, 87, 46);
+        static readonly Color C_GREY = Color.FromArgb(107, 90, 73);
+
+        class Mole
+        {
+            public int Cell;
+            public long T0;
+            public int Show;
+            public bool Hit;
+            public long HitAt;
+            public float P0;
+        }
+
+        public int Best;
+
+        int scale;
+        Bitmap buf;
+        Timer timer;
+        System.Diagnostics.Stopwatch clock = new System.Diagnostics.Stopwatch();
+        Random rnd = new Random();
+        Dictionary<int, SolidBrush> brushes = new Dictionary<int, SolidBrush>();
+        Font fSmall, fMid, fBig;
+
+        int state = ST_TITLE;
+        long stateAt = 0;
+        int stage = 0;
+        int spawned = 0;
+        int lastCell = -1;
+        long nextSpawn = 0;
+        bool newBest = false;
+        List<Mole> moles = new List<Mole>();
+        List<int> results = new List<int>();
+        int[] stageHits = new int[3];
+        List<float[]> confetti = new List<float[]>();
+        List<long[]> pops = new List<long[]>();
+
+        public MoleGame(int best, float dpiScale)
+        {
+            Best = best;
+            scale = Math.Max(2, (int)Math.Round(2 * dpiScale));
+            Text = "두더지 잡기";
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            KeyPreview = true;
+            DoubleBuffered = true;
+            ClientSize = new Size(W * scale, H * scale);
+            Icon = MakeFaceIcon();
+            BackColor = Color.Black;
+
+            fSmall = new Font("Consolas", 9f, FontStyle.Bold, GraphicsUnit.Pixel);
+            fMid = new Font("Consolas", 12f, FontStyle.Bold, GraphicsUnit.Pixel);
+            fBig = new Font("Consolas", 16f, FontStyle.Bold, GraphicsUnit.Pixel);
+            buf = new Bitmap(W, H);
+
+            timer = new Timer();
+            timer.Interval = 30;
+            timer.Tick += new EventHandler(Timer_Tick);
+            clock.Start();
+            timer.Start();
+            Skin.TitleBar(this, Skin.Dark);
+        }
+
+        Icon MakeFaceIcon()
+        {
+            try
+            {
+                Bitmap b = new Bitmap(32, 32);
+                using (Graphics g = Graphics.FromImage(b))
+                {
+                    g.Clear(Color.Transparent);
+                    DrawSprite(g, FACE, 0, 0, 2, false);
+                }
+                return Icon.FromHandle(b.GetHicon());
+            }
+            catch { return null; }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            timer.Stop();
+            timer.Dispose();
+            buf.Dispose();
+            foreach (SolidBrush b in brushes.Values) b.Dispose();
+            brushes.Clear();
+            fSmall.Dispose();
+            fMid.Dispose();
+            fBig.Dispose();
+            base.OnFormClosed(e);
+        }
+
+        // ---------- 입력 ----------
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape) { Close(); return; }
+            int cell = -1;
+            switch (e.KeyCode)
+            {
+                case Keys.NumPad7: cell = 0; break;
+                case Keys.NumPad8: cell = 1; break;
+                case Keys.NumPad9: cell = 2; break;
+                case Keys.NumPad4: cell = 3; break;
+                case Keys.NumPad5: cell = 4; break;
+                case Keys.NumPad6: cell = 5; break;
+                case Keys.NumPad1: cell = 6; break;
+                case Keys.NumPad2: cell = 7; break;
+                case Keys.NumPad3: cell = 8; break;
+            }
+            if (cell >= 0 && state == ST_PLAY) TryHit(cell, clock.ElapsedMilliseconds);
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            long now = clock.ElapsedMilliseconds;
+            if (e.Button != MouseButtons.Left) return;
+            if (state == ST_TITLE) { StartGame(now); return; }
+            if (state == ST_RESULT) { if (now - stateAt > 800) StartGame(now); return; }
+            if (state != ST_PLAY) return;
+            int x = e.X / scale, y = e.Y / scale;
+            for (int i = 0; i < 9; i++)
+            {
+                Point p = CellPos(i);
+                if (x >= p.X && x <= p.X + 40 && y >= p.Y - 8 && y <= p.Y + 38) { TryHit(i, now); return; }
+            }
+        }
+
+        // ---------- 게임 진행 ----------
+
+        void StartGame(long now)
+        {
+            moles.Clear();
+            results.Clear();
+            pops.Clear();
+            confetti.Clear();
+            stageHits = new int[3];
+            stage = 0;
+            spawned = 0;
+            lastCell = -1;
+            newBest = false;
+            state = ST_INTRO;
+            stateAt = now;
+        }
+
+        int Total()
+        {
+            int n = 0;
+            foreach (int c in STAGE_COUNT) n += c;
+            return n;
+        }
+
+        int Hits()
+        {
+            int n = 0;
+            foreach (int r in results) if (r == 1) n++;
+            return n;
+        }
+
+        Point CellPos(int i) { return new Point(10 + (i % 3) * 45, 62 + (i / 3) * 45); }
+
+        float Prog(Mole m, long now)
+        {
+            if (m.Hit) return Math.Max(0f, m.P0 * (1f - (now - m.HitAt) / (float)HIT_MS));
+            long age = now - m.T0;
+            float p;
+            if (age < UP_MS) p = age / (float)UP_MS;
+            else if (age > m.Show - UP_MS) p = (m.Show - age) / (float)UP_MS;
+            else p = 1f;
+            if (p < 0f) p = 0f;
+            if (p > 1f) p = 1f;
+            return p;
+        }
+
+        void TryHit(int cell, long now)
+        {
+            foreach (Mole m in moles)
+            {
+                if (m.Hit || m.Cell != cell) continue;
+                float p = Prog(m, now);
+                if (p < 0.3f) continue;
+                m.Hit = true;
+                m.HitAt = now;
+                m.P0 = p;
+                results.Add(1);
+                stageHits[stage]++;
+                Point c = CellPos(cell);
+                pops.Add(new long[] { c.X + 20, c.Y - 6, now });
+                return;
+            }
+        }
+
+        int FreeCell()
+        {
+            List<int> free = new List<int>();
+            for (int i = 0; i < 9; i++)
+            {
+                bool used = false;
+                foreach (Mole m in moles) if (m.Cell == i) used = true;
+                if (!used && i != lastCell) free.Add(i);
+            }
+            if (free.Count == 0) return -1;
+            return free[rnd.Next(free.Count)];
+        }
+
+        void Timer_Tick(object sender, EventArgs e)
+        {
+            Step(clock.ElapsedMilliseconds);
+            Invalidate();
+        }
+
+        void Step(long now)
+        {
+            if (state == ST_INTRO && now - stateAt >= INTRO_MS)
+            {
+                state = ST_PLAY;
+                stateAt = now;
+                nextSpawn = now;
+            }
+            else if (state == ST_PLAY)
+            {
+                for (int i = moles.Count - 1; i >= 0; i--)
+                {
+                    Mole m = moles[i];
+                    if (m.Hit) { if (now - m.HitAt >= HIT_MS) moles.RemoveAt(i); }
+                    else if (now - m.T0 >= m.Show) { results.Add(0); moles.RemoveAt(i); }
+                }
+                if (spawned < STAGE_COUNT[stage] && now >= nextSpawn)
+                {
+                    int c = FreeCell();
+                    if (c >= 0)
+                    {
+                        Mole m = new Mole();
+                        m.Cell = c;
+                        m.T0 = now;
+                        m.Show = STAGE_SHOW[stage];
+                        moles.Add(m);
+                        lastCell = c;
+                        spawned++;
+                        nextSpawn = now + STAGE_SPAWN[stage];
+                    }
+                }
+                if (spawned >= STAGE_COUNT[stage] && moles.Count == 0)
+                {
+                    stage++;
+                    spawned = 0;
+                    if (stage >= STAGE_COUNT.Length) Finish(now);
+                    else { state = ST_INTRO; stateAt = now; }
+                }
+            }
+        }
+
+        void Finish(long now)
+        {
+            state = ST_RESULT;
+            stateAt = now;
+            stage = STAGE_COUNT.Length - 1;
+            pops.Clear();
+            int h = Hits();
+            if (h > Best) { Best = h; newBest = true; }
+            if (h == Total())
+            {
+                for (int i = 0; i < 70; i++)
+                    confetti.Add(new float[] { (float)rnd.NextDouble() * W, -(float)rnd.NextDouble() * H, 0.6f + (float)rnd.NextDouble() * 1.2f, rnd.Next(6) });
+            }
+        }
+
+        // ---------- 그리기 ----------
+
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            long now = clock.ElapsedMilliseconds;
+            using (Graphics g = Graphics.FromImage(buf))
+            {
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+                DrawGame(g, now);
+            }
+            e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            e.Graphics.DrawImage(buf, new Rectangle(0, 0, W * scale, H * scale));
+        }
+
+        SolidBrush Br(Color c)
+        {
+            SolidBrush b;
+            int k = c.ToArgb();
+            if (!brushes.TryGetValue(k, out b)) { b = new SolidBrush(c); brushes[k] = b; }
+            return b;
+        }
+
+        void Rect(Graphics g, Color c, int x, int y, int w, int h) { g.FillRectangle(Br(c), x, y, w, h); }
+
+        void Ell(Graphics g, Color c, int cx, int cy, int rx, int ry)
+        {
+            for (int y = -ry; y <= ry; y++)
+            {
+                int w = (int)Math.Round(rx * Math.Sqrt(1.0 - (y * y) / (ry * ry + 0.5)));
+                g.FillRectangle(Br(c), cx - w, cy + y, w * 2, 1);
+            }
+        }
+
+        Color SpriteColor(char ch)
+        {
+            switch (ch)
+            {
+                case 'B': return C_MOLE;
+                case 'K': return C_INK;
+                case 'N': return C_NOSE;
+                case 'L': return C_SNOUT;
+                case 'W': return Color.White;
+                case 'Y': return C_GOLD;
+            }
+            return Color.Transparent;
+        }
+
+        void DrawSprite(Graphics g, string[] rows, int x, int y, int s, bool outline)
+        {
+            int r, c;
+            if (outline)
+            {
+                int[] dx = { 1, -1, 0, 0 };
+                int[] dy = { 0, 0, 1, -1 };
+                for (int i = 0; i < 4; i++)
+                    for (r = 0; r < rows.Length; r++)
+                        for (c = 0; c < rows[r].Length; c++)
+                            if (rows[r][c] != '.') Rect(g, C_INK, x + c * s + dx[i], y + r * s + dy[i], s, s);
+            }
+            for (r = 0; r < rows.Length; r++)
+                for (c = 0; c < rows[r].Length; c++)
+                    if (rows[r][c] != '.') Rect(g, SpriteColor(rows[r][c]), x + c * s, y + r * s, s, s);
+        }
+
+        float TextWidth(Graphics g, string s, Font f)
+        {
+            return g.MeasureString(s, f, PointF.Empty, StringFormat.GenericTypographic).Width;
+        }
+
+        void Say(Graphics g, string s, Font f, Color c, float x, float y, bool center)
+        {
+            if (center) x -= TextWidth(g, s, f) / 2f;
+            g.DrawString(s, f, Br(C_INK), x + 1, y + 1, StringFormat.GenericTypographic);
+            g.DrawString(s, f, Br(c), x, y, StringFormat.GenericTypographic);
+        }
+
+        static Color Hue(double h)
+        {
+            h = h % 360.0;
+            if (h < 0) h += 360.0;
+            double x = 1.0 - Math.Abs((h / 60.0) % 2.0 - 1.0);
+            double r = 0, g = 0, b = 0;
+            if (h < 60) { r = 1; g = x; }
+            else if (h < 120) { r = x; g = 1; }
+            else if (h < 180) { g = 1; b = x; }
+            else if (h < 240) { g = x; b = 1; }
+            else if (h < 300) { r = x; b = 1; }
+            else { r = 1; b = x; }
+            return Color.FromArgb((int)(120 + r * 135), (int)(120 + g * 135), (int)(120 + b * 135));
+        }
+
+        void DrawGame(Graphics g, long now)
+        {
+            // 풀밭
+            Rect(g, C_GRASS, 0, 0, W, H);
+            for (int y = 44; y < H; y += 10)
+                for (int x = ((y / 10) % 2) * 10; x < W; x += 20)
+                    Rect(g, C_GRASS2, x, y, 10, 10);
+            int[] tx = { 8, 40, 84, 120, 140, 22, 110, 70 };
+            int[] ty = { 200, 196, 203, 198, 204, 52, 54, 50 };
+            for (int i = 0; i < tx.Length; i++)
+            {
+                Rect(g, C_TUFT, tx[i], ty[i], 1, 3);
+                Rect(g, C_TUFT, tx[i] + 2, ty[i] + 1, 1, 2);
+                Rect(g, C_TUFT, tx[i] + 4, ty[i], 1, 3);
+            }
+
+            DrawHud(g, now);
+            for (int i = 0; i < 9; i++) DrawCell(g, i, now);
+
+            // +1 표시
+            for (int i = pops.Count - 1; i >= 0; i--)
+            {
+                long age = now - pops[i][2];
+                if (age > 450) { pops.RemoveAt(i); continue; }
+                Say(g, "+1", fSmall, C_GOLD, pops[i][0], pops[i][1] - age / 40, true);
+            }
+
+            bool blink = (now / 400) % 2 == 0;
+            if (state == ST_TITLE)
+            {
+                Overlay(g, 160);
+                DrawSprite(g, MOLE, 57, 60, 3, true);
+                Say(g, "WHACK", fBig, C_GOLD, 75, 98, true);
+                Say(g, "A MOLE", fBig, Color.White, 75, 118, true);
+                if (blink) Say(g, "CLICK TO START", fSmall, Color.White, 75, 166, true);
+            }
+            else if (state == ST_INTRO)
+            {
+                Overlay(g, 140);
+                Say(g, "STAGE " + (stage + 1), fBig, Color.White, 75, 84, true);
+                Say(g, STAGE_NAME[stage], fMid, stage == 2 ? C_RED : C_GOLD, 75, 108, true);
+                Say(g, STAGE_COUNT[stage] + " MOLES", fSmall, Color.White, 75, 130, true);
+            }
+            else if (state == ST_RESULT)
+            {
+                if (Hits() == Total()) DrawPerfect(g, now, blink);
+                else DrawEnding(g, now, blink);
+            }
+        }
+
+        void DrawHud(Graphics g, long now)
+        {
+            Rect(g, C_HUD, 0, 0, W, 44);
+            Rect(g, C_INK, 0, 44, W, 2);
+            Say(g, "STAGE " + (state == ST_TITLE ? 1 : stage + 1), fSmall, Color.White, 6, 7, false);
+            string hit = "HIT " + Hits().ToString("00") + "/" + Total();
+            Say(g, hit, fSmall, C_GOLD, W - 6 - TextWidth(g, hit, fSmall), 7, false);
+            int total = Total();
+            for (int i = 0; i < total; i++)
+            {
+                Color c = C_GREY;
+                if (i < results.Count) c = results[i] == 1 ? C_GOLD : C_RED;
+                Rect(g, c, 3 + i * 6, 26, 5, 8);
+            }
+        }
+
+        void DrawCell(Graphics g, int i, long now)
+        {
+            Point p = CellPos(i);
+            int x = p.X, y = p.Y;
+            Ell(g, C_DIRTD, x + 20, y + 31, 18, 6);
+            if (state == ST_PLAY)
+            {
+                foreach (Mole m in moles)
+                {
+                    if (m.Cell != i) continue;
+                    float mp = Prog(m, now);
+                    if (mp <= 0f) continue;
+                    GraphicsState gs = g.Save();
+                    g.SetClip(new Rectangle(x - 2, y - 12, 44, 43));
+                    DrawSprite(g, m.Hit ? MOLE_HIT : MOLE, x + 2, (int)Math.Round(y + 31 - 24 * mp), 3, true);
+                    g.Restore(gs);
+                }
+            }
+            GraphicsState gs2 = g.Save();
+            g.SetClip(new Rectangle(x - 2, y + 31, 44, 12));
+            Ell(g, C_DIRT, x + 20, y + 31, 19, 6);
+            Ell(g, C_DIRTD, x + 20, y + 31, 15, 4);
+            g.Restore(gs2);
+            Rect(g, C_DIRTL, x + 3, y + 36, 3, 1);
+            Rect(g, C_DIRTL, x + 33, y + 36, 3, 1);
+            Rect(g, C_DIRTL, x + 12, y + 38, 6, 1);
+        }
+
+        void Overlay(Graphics g, int alpha)
+        {
+            Rect(g, Color.FromArgb(alpha, 20, 12, 6), 0, 0, W, H);
+        }
+
+        // 만점: 화려한 축하 화면
+        void DrawPerfect(Graphics g, long now, bool blink)
+        {
+            Overlay(g, 200);
+            Color[] cc = { C_GOLD, C_RED, Color.FromArgb(76, 201, 240), Color.FromArgb(181, 232, 83), Color.FromArgb(255, 143, 171), Color.White };
+            foreach (float[] f in confetti)
+            {
+                f[1] += f[2];
+                if (f[1] > H) { f[1] = -4; f[0] = (float)rnd.NextDouble() * W; }
+                Rect(g, cc[(int)f[3]], (int)f[0], (int)f[1], 2, 2);
+            }
+            // 반짝이는 별
+            int[] sx = { 12, 138, 24, 128, 8, 142, 40, 110 };
+            int[] sy = { 54, 60, 150, 140, 100, 104, 190, 186 };
+            for (int i = 0; i < sx.Length; i++)
+            {
+                if (((now / 160) + i) % 3 == 0) continue;
+                Rect(g, C_GOLD, sx[i] - 2, sy[i], 5, 1);
+                Rect(g, C_GOLD, sx[i], sy[i] - 2, 1, 5);
+            }
+            // 무지개색 물결 글자
+            string msg = "CONGRATULATIONS!";
+            float adv = TextWidth(g, "M", fMid);
+            float x0 = 75 - adv * msg.Length / 2f;
+            for (int i = 0; i < msg.Length; i++)
+            {
+                int dy = (int)Math.Round(Math.Sin(now / 140.0 + i * 0.6) * 3);
+                Say(g, msg[i].ToString(), fMid, Hue(i * 24 + now / 4), x0 + i * adv, 56 + dy, false);
+            }
+            Say(g, "PERFECT " + Total() + "/" + Total(), fSmall, Color.White, 75, 80, true);
+            DrawSprite(g, CROWN, 68, 95, 3, true);
+            DrawSprite(g, MOLE, 57, 106, 3, true);
+            Say(g, "made by", fSmall, Color.White, 75, 142, true);
+            Say(g, "SJAHN", fBig, blink ? C_GOLD : Color.White, 75, 155, true);
+            if (now - stateAt > 800 && blink) Say(g, "CLICK TO RETRY", fSmall, Color.White, 75, 192, true);
+        }
+
+        // 만점이 아닐 때: 일반 엔딩
+        void DrawEnding(Graphics g, long now, bool blink)
+        {
+            Overlay(g, 170);
+            Say(g, "GAME OVER", fBig, Color.White, 75, 54, true);
+            Say(g, Hits() + " / " + Total(), fMid, C_GOLD, 75, 78, true);
+            for (int i = 0; i < 3; i++)
+            {
+                Say(g, STAGE_NAME[i], fSmall, Color.White, 38, 100 + i * 13, false);
+                string sc = stageHits[i] + "/" + STAGE_COUNT[i];
+                Say(g, sc, fSmall, stageHits[i] == STAGE_COUNT[i] ? C_GOLD : Color.White, 112 - TextWidth(g, sc, fSmall), 100 + i * 13, false);
+            }
+            Say(g, (newBest ? "NEW BEST " : "BEST ") + Best, fSmall, newBest ? C_GOLD : Color.White, 75, 144, true);
+            DrawSprite(g, MOLE_HIT, 57, 158, 3, true);
+            if (now - stateAt > 800 && blink) Say(g, "CLICK TO RETRY", fSmall, Color.White, 75, 192, true);
         }
     }
 }
