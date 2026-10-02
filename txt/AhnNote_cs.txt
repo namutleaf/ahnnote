@@ -1832,6 +1832,23 @@ namespace AhnNote
             MarkDirty();
         }
 
+        // 줄 맨 앞에 커서를 두고, 그 줄 글자와 같은 모양으로 맞춤
+        void CaretToLineStart(string t, int ls)
+        {
+            Font f = SelFont();
+            Color c = ed.SelectionColor;
+            if (ls < t.Length && t[ls] != '\n')
+            {
+                ed.Select(ls, 1);
+                Font f2 = SelFont();
+                if (f2 != null) { f = f2; c = ed.SelectionColor; }
+            }
+            if (f == null) f = baseFont;
+            ed.Select(ls, 0);
+            ed.SelectionFont = f;
+            ed.SelectionColor = c;
+        }
+
         void ToggleTodo()
         {
             string t = ed.Text;
@@ -1843,7 +1860,7 @@ namespace AhnNote
             }
             else
             {
-                ed.Select(ls, 0);
+                CaretToLineStart(t, ls);
                 InsertCheckbox();
                 ed.Select(s0 + 2, l0);
             }
@@ -1863,7 +1880,7 @@ namespace AhnNote
             }
             else
             {
-                ed.Select(ls, 0);
+                CaretToLineStart(t, ls);
                 ed.SelectedText = BULLET;
                 ed.Select(s0 + 2, l0);
             }
@@ -1896,6 +1913,7 @@ namespace AhnNote
                 e.SuppressKeyPress = true;
                 ed.Select(ls, 3);
                 ed.SelectedText = new string('─', 30) + "\n";
+                ed.SelectionFont = baseFont;
                 MarkDirty();
                 return;
             }
@@ -1905,15 +1923,23 @@ namespace AhnNote
             if ((isBullet || isTodo) && pos >= ls + 2)
             {
                 e.SuppressKeyPress = true;
+                Font keepFont = SelFont();
+                if (keepFont == null || IsHeadingFont(keepFont)) keepFont = baseFont;
+                Color keepColor = ed.SelectionColor;
                 if (line.Length == 2)
                 {
                     // 빈 항목에서 엔터 → 목록 끝내기
                     ed.Select(ls, 2);
                     ed.SelectedText = "";
+                    ed.SelectionFont = keepFont;
+                    ed.SelectionColor = keepColor;
                 }
                 else
                 {
                     ed.SelectedText = "\n";
+                    // 새 줄은 문서 끝 글자 모양(예: 제목)을 따라가므로 지금 글자 모양으로 다시 지정
+                    ed.SelectionFont = keepFont;
+                    ed.SelectionColor = keepColor;
                     if (isBullet) ed.SelectedText = BULLET;
                     else InsertCheckbox();
                 }
