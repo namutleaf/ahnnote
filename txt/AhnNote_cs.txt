@@ -1555,6 +1555,8 @@ namespace AhnNote
             topMost = !topMost;
             TopMost = topMost;
             topBtn.Checked = topMost;
+            if (findForm != null) findForm.TopMost = topMost;
+            if (mole != null && !mole.IsDisposed) mole.TopMost = topMost;
             SaveSettings();
             stLeft.Text = topMost ? "항상 위에 표시: 켜짐" : "항상 위에 표시: 꺼짐";
         }
@@ -1611,6 +1613,7 @@ namespace AhnNote
             mole = new MoleGame(moleBest, S);
             mole.FormClosed += new FormClosedEventHandler(Mole_Closed);
             mole.StartPosition = FormStartPosition.Manual;
+            mole.TopMost = TopMost;
             mole.Location = new Point(Left + (Width - mole.Width) / 2, Top + (Height - mole.Height) / 2);
             mole.Show(this);
         }
@@ -2018,6 +2021,7 @@ namespace AhnNote
                 findForm = new FindForm(this, ed, S);
                 Skin.Apply(findForm);
             }
+            findForm.TopMost = TopMost;
             string sel = ed.SelectedText;
             if (sel.Length > 0 && sel.IndexOf('\n') < 0 && sel.Length < 100) findForm.SetFindText(sel);
             findForm.Open(replace);
@@ -2602,6 +2606,7 @@ namespace AhnNote
                 f.CancelButton = cancel;
                 tb.SelectAll();
                 Skin.Apply(f);
+                f.TopMost = owner.TopMost;   // 항상 위일 때 입력창이 뒤로 숨지 않게
 
                 if (f.ShowDialog(owner) == DialogResult.OK) return tb.Text;
                 return null;
