@@ -1,0 +1,1992 @@
+// AHNNOTE - 가벼운 노트 앱
+// Windows 11 기본 포함 .NET Framework 4.x 의 csc.exe 로 빌드 (BUILD.BAT 실행)
+// 메모장으로 저장할 때 인코딩은 UTF-8 로 저장하세요.
+
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+
+namespace AhnNote
+{
+    static class Program
+    {
+        [DllImport("user32.dll")]
+        static extern bool SetProcessDPIAware();
+
+        [STAThread]
+        static void Main()
+        {
+            try { SetProcessDPIAware(); } catch { }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+
+    // RichEdit 직접 호출용 (형광펜 없애기)
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct CHARFORMAT2
+    {
+        public int cbSize;
+        public uint dwMask;
+        public uint dwEffects;
+        public int yHeight;
+        public int yOffset;
+        public int crTextColor;
+        public byte bCharSet;
+        public byte bPitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szFaceName;
+        public short wWeight;
+        public short sSpacing;
+        public int crBackColor;
+        public int lcid;
+        public int dwReserved;
+        public short sStyle;
+        public short wKerning;
+        public byte bUnderlineType;
+        public byte bAnimation;
+        public byte bRevAuthor;
+        public byte bReserved1;
+    }
+
+    public class MainForm : Form
+    {
+        // ---------- 상수 ----------
+        const string DATA_FOLDER = "AhnNoteData";
+        const string TRASH = "_휴지통";
+        const string FONT_NAME = "Malgun Gothic";
+        const string SYM_FONT = "Segoe UI Symbol";
+        const float BASE_SIZE = 11f;
+        const string BOX = "☐";
+        const string BOX_ON = "☑";
+        const string BULLET = "• ";
+
+        const int MODE_STYLE = 0;
+        const int MODE_SIZE = 1;
+        const int MODE_GROW = 2;
+
+        // 자동 변환 규칙 (긴 것부터 검사)
+        static readonly string[] RULE_FROM = { "<=>", "←>", "[ ]", "[]", "[x]", "[X]", "[v]", "()", "->", "<-", "=>" };
+        static readonly string[] RULE_TO = { "⇔", "↔", BOX, BOX, BOX_ON, BOX_ON, BOX_ON, "○", "→", "←", "⇒" };
+
+        static readonly Color THEME = Color.FromArgb(119, 25, 170);
+        static readonly Color SIDE_BACK = Color.FromArgb(246, 241, 250);
+        static readonly Color SEL_BACK = Color.FromArgb(232, 218, 243);
+        static readonly Color LINE_COLOR = Color.FromArgb(220, 220, 220);
+        static readonly Color[] NB_COLORS = {
+            Color.FromArgb(119, 25, 170), Color.FromArgb(11, 107, 203), Color.FromArgb(15, 123, 108),
+            Color.FromArgb(217, 115, 13), Color.FromArgb(224, 62, 62), Color.FromArgb(105, 64, 165),
+            Color.FromArgb(0, 137, 123), Color.FromArgb(194, 24, 91) };
+
+        // ---------- Win32 ----------
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
+        static extern IntPtr SendCharFormat(IntPtr h, int msg, IntPtr w, ref CHARFORMAT2 cf);
+        const int WM_SETREDRAW = 0x000B;
+        const int EM_SETCHARFORMAT = 0x0444;
+        const int SCF_SELECTION = 0x0001;
+        const uint CFM_BACKCOLOR = 0x04000000;
+
+        // ---------- 화면 ----------
+        float S = 1f;
+        ToolStrip tool;
+        ToolStripButton boldBtn, italicBtn, underBtn, strikeBtn;
+        ToolStripComboBox sizeBox;
+        ToolStripSplitButton foreBtn, hiBtn;
+        ToolStripDropDownButton bgBtn, headBtn;
+        StatusStrip status;
+        ToolStripStatusLabel stLeft, stRight;
+        SplitContainer split1, split2;
+        ListBox nbList, pgList;
+        Panel pagePanel;
+        TextBox titleBox;
+        Label dateLabel;
+        RichTextBox ed;
+        ContextMenuStrip nbMenu, pgMenu, edMenu;
+        ToolStripMenuItem moveToMenu;
+        Timer saveTimer;
+        FindForm findForm;
+
+        // ---------- 데이터 ----------
+        string dataDir;
+        string curNotebook;
+        string curPage;
+        List<string> nbOrder = new List<string>();
+        List<string> pgOrder = new List<string>();
+        Dictionary<string, string> pgBg = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Font baseFont;
+        Color lastFore = Color.FromArgb(224, 62, 62);
+        Color lastHi = Color.FromArgb(255, 241, 118);
+        bool dirty = false;
+        bool loading = false;
+        bool listBusy = false;
+        bool uiBusy = false;
+        string lastSaved = "";
+
+        public MainForm()
+        {
+            using (Graphics g = CreateGraphics()) { S = g.DpiX / 96f; }
+            baseFont = new Font(FONT_NAME, BASE_SIZE);
+            Text = "AHNNOTE";
+            Font = new Font(FONT_NAME, 9f);
+            Size = new Size(Px(1200), Px(780));
+            StartPosition = FormStartPosition.CenterScreen;
+            Icon = MakeIcon();
+
+            BuildEditor();
+            BuildLists();
+            BuildToolbar();
+            BuildStatus();
+            BuildMenus();
+
+            split2 = new SplitContainer();
+            split2.Dock = DockStyle.Fill;
+            split2.FixedPanel = FixedPanel.Panel1;
+            split2.SplitterWidth = Px(3);
+            split2.BackColor = LINE_COLOR;
+            split2.Panel1.BackColor = Color.White;
+            split2.Panel2.BackColor = Color.White;
+            split2.Panel1.Controls.Add(MakeSidePanel("페이지", pgList, "+ 페이지 추가", new EventHandler(NewPage_Click), Color.White));
+            split2.Panel2.Controls.Add(pagePanel);
+
+            split1 = new SplitContainer();
+            split1.Dock = DockStyle.Fill;
+            split1.FixedPanel = FixedPanel.Panel1;
+            split1.SplitterWidth = Px(3);
+            split1.BackColor = LINE_COLOR;
+            split1.Panel1.BackColor = SIDE_BACK;
+            split1.Panel2.BackColor = Color.White;
+            Panel nbPanel = MakeSidePanel("노트북", nbList, "+ 노트북 추가", new EventHandler(NewNotebook_Click), SIDE_BACK);
+            Label logo = new Label();
+            logo.Text = "  AHNNOTE";
+            logo.Dock = DockStyle.Top;
+            logo.Height = Px(46);
+            logo.TextAlign = ContentAlignment.MiddleLeft;
+            logo.BackColor = THEME;
+            logo.ForeColor = Color.White;
+            logo.Font = new Font(FONT_NAME, 14f, FontStyle.Bold);
+            nbPanel.Controls.Add(logo);
+            split1.Panel1.Controls.Add(nbPanel);
+            split1.Panel2.Controls.Add(split2);
+
+            Controls.Add(split1);
+            Controls.Add(tool);
+            Controls.Add(status);
+
+            saveTimer = new Timer();
+            saveTimer.Interval = 3000;
+            saveTimer.Tick += new EventHandler(SaveTimer_Tick);
+            saveTimer.Start();
+        }
+
+        int Px(int v) { return (int)(v * S); }
+
+        // ================= 화면 구성 =================
+
+        void BuildEditor()
+        {
+            ed = new RichTextBox();
+            ed.Dock = DockStyle.Fill;
+            ed.BorderStyle = BorderStyle.None;
+            ed.Font = baseFont;
+            ed.AcceptsTab = true;
+            ed.HideSelection = false;
+            ed.DetectUrls = true;
+            ed.ScrollBars = RichTextBoxScrollBars.Vertical;
+            ed.LanguageOption = RichTextBoxLanguageOptions.UIFonts; // 한글 입력 시 글꼴이 바뀌는 문제 방지
+            ed.TextChanged += new EventHandler(Ed_TextChanged);
+            ed.SelectionChanged += new EventHandler(Ed_SelectionChanged);
+            ed.KeyDown += new KeyEventHandler(Ed_KeyDown);
+            ed.KeyPress += new KeyPressEventHandler(Ed_KeyPress);
+            ed.MouseUp += new MouseEventHandler(Ed_MouseUp);
+            ed.LinkClicked += new LinkClickedEventHandler(Ed_LinkClicked);
+
+            titleBox = new TextBox();
+            titleBox.Dock = DockStyle.Top;
+            titleBox.BorderStyle = BorderStyle.None;
+            titleBox.Font = new Font(FONT_NAME, 20f);
+            titleBox.KeyDown += new KeyEventHandler(TitleBox_KeyDown);
+            titleBox.Leave += new EventHandler(TitleBox_Leave);
+
+            Panel line = new Panel();
+            line.Dock = DockStyle.Top;
+            line.Height = 1;
+            line.BackColor = LINE_COLOR;
+
+            dateLabel = new Label();
+            dateLabel.Dock = DockStyle.Top;
+            dateLabel.Height = Px(34);
+            dateLabel.ForeColor = Color.Gray;
+            dateLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+            pagePanel = new Panel();
+            pagePanel.Dock = DockStyle.Fill;
+            pagePanel.BackColor = Color.White;
+            pagePanel.Padding = new Padding(Px(40), Px(20), Px(16), Px(6));
+            pagePanel.Controls.Add(ed);
+            pagePanel.Controls.Add(dateLabel);
+            pagePanel.Controls.Add(line);
+            pagePanel.Controls.Add(titleBox);
+        }
+
+        void BuildLists()
+        {
+            nbList = MakeList(SIDE_BACK);
+            nbList.SelectedIndexChanged += new EventHandler(NbList_SelectedIndexChanged);
+            nbList.KeyDown += new KeyEventHandler(NbList_KeyDown);
+
+            pgList = MakeList(Color.White);
+            pgList.SelectedIndexChanged += new EventHandler(PgList_SelectedIndexChanged);
+            pgList.KeyDown += new KeyEventHandler(PgList_KeyDown);
+        }
+
+        ListBox MakeList(Color back)
+        {
+            ListBox lb = new ListBox();
+            lb.Dock = DockStyle.Fill;
+            lb.BorderStyle = BorderStyle.None;
+            lb.BackColor = back;
+            lb.DrawMode = DrawMode.OwnerDrawFixed;
+            lb.ItemHeight = Px(32);
+            lb.IntegralHeight = false;
+            lb.Font = new Font(FONT_NAME, 10f);
+            lb.DrawItem += new DrawItemEventHandler(List_DrawItem);
+            lb.MouseDown += new MouseEventHandler(List_MouseDown);
+            return lb;
+        }
+
+        Panel MakeSidePanel(string title, ListBox list, string btnText, EventHandler onAdd, Color back)
+        {
+            Panel p = new Panel();
+            p.Dock = DockStyle.Fill;
+            p.BackColor = back;
+
+            Label head = new Label();
+            head.Text = "  " + title;
+            head.Dock = DockStyle.Top;
+            head.Height = Px(32);
+            head.TextAlign = ContentAlignment.MiddleLeft;
+            head.ForeColor = Color.DimGray;
+            head.Font = new Font(FONT_NAME, 9f, FontStyle.Bold);
+
+            Button add = new Button();
+            add.Text = btnText;
+            add.Dock = DockStyle.Bottom;
+            add.Height = Px(36);
+            add.FlatStyle = FlatStyle.Flat;
+            add.FlatAppearance.BorderSize = 0;
+            add.ForeColor = THEME;
+            add.TextAlign = ContentAlignment.MiddleLeft;
+            add.Padding = new Padding(Px(8), 0, 0, 0);
+            add.Cursor = Cursors.Hand;
+            add.TabStop = false;
+            add.Click += onAdd;
+
+            p.Controls.Add(list);
+            p.Controls.Add(head);
+            p.Controls.Add(add);
+            return p;
+        }
+
+        void BuildToolbar()
+        {
+            tool = new ToolStrip();
+            tool.GripStyle = ToolStripGripStyle.Hidden;
+            tool.ImageScalingSize = new Size(Px(16), Px(16));
+            tool.Padding = new Padding(Px(6), Px(3), Px(6), Px(3));
+            tool.BackColor = Color.White;
+            tool.RenderMode = ToolStripRenderMode.System;
+            tool.Font = new Font(FONT_NAME, 9f);
+
+            AddBtn("+ 노트북", "새 노트북 (Ctrl+Shift+N)", new EventHandler(NewNotebook_Click));
+            AddBtn("+ 페이지", "새 페이지 (Ctrl+N)", new EventHandler(NewPage_Click));
+            tool.Items.Add(new ToolStripSeparator());
+
+            boldBtn = AddBtn("B", "굵게 (Ctrl+B)", new EventHandler(Bold_Click));
+            boldBtn.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+            italicBtn = AddBtn("I", "기울임 (Ctrl+I)", new EventHandler(Italic_Click));
+            italicBtn.Font = new Font("Times New Roman", 11f, FontStyle.Italic | FontStyle.Bold);
+            underBtn = AddBtn("U", "밑줄 (Ctrl+U)", new EventHandler(Under_Click));
+            underBtn.Font = new Font("Segoe UI", 10f, FontStyle.Underline);
+            strikeBtn = AddBtn("S", "취소선 (Ctrl+-)", new EventHandler(Strike_Click));
+            strikeBtn.Font = new Font("Segoe UI", 10f, FontStyle.Strikeout);
+            tool.Items.Add(new ToolStripSeparator());
+
+            sizeBox = new ToolStripComboBox();
+            sizeBox.AutoSize = false;
+            sizeBox.Width = Px(52);
+            sizeBox.ToolTipText = "글자 크기 (Ctrl+Shift+> / <)";
+            string[] sizes = { "8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "32", "36", "48", "72" };
+            sizeBox.Items.AddRange(sizes);
+            sizeBox.SelectedIndexChanged += new EventHandler(SizeBox_Changed);
+            sizeBox.KeyDown += new KeyEventHandler(SizeBox_KeyDown);
+            tool.Items.Add(sizeBox);
+
+            headBtn = new ToolStripDropDownButton("제목");
+            headBtn.ToolTipText = "제목 스타일";
+            AddMenu(headBtn, "제목 1  (Ctrl+Alt+1)", 1, new EventHandler(Heading_Click));
+            AddMenu(headBtn, "제목 2  (Ctrl+Alt+2)", 2, new EventHandler(Heading_Click));
+            AddMenu(headBtn, "제목 3  (Ctrl+Alt+3)", 3, new EventHandler(Heading_Click));
+            AddMenu(headBtn, "본문  (Ctrl+Alt+0)", 0, new EventHandler(Heading_Click));
+            tool.Items.Add(headBtn);
+            tool.Items.Add(new ToolStripSeparator());
+
+            Color[] fc = { Color.Black, Color.FromArgb(224, 62, 62), Color.FromArgb(217, 115, 13), Color.FromArgb(203, 145, 47),
+                           Color.FromArgb(15, 123, 108), Color.FromArgb(11, 107, 203), Color.FromArgb(105, 64, 165), Color.FromArgb(155, 154, 151) };
+            string[] fn = { "검정", "빨강", "주황", "노랑", "초록", "파랑", "보라", "회색" };
+            foreBtn = new ToolStripSplitButton("글자색");
+            foreBtn.Image = MakeSwatch(lastFore);
+            foreBtn.ToolTipText = "글자색";
+            foreBtn.ButtonClick += new EventHandler(ForeBtn_Click);
+            AddColorItems(foreBtn, fc, fn, new EventHandler(ForePick_Click), true);
+            tool.Items.Add(foreBtn);
+
+            Color[] hc = { Color.FromArgb(255, 241, 118), Color.FromArgb(197, 225, 165), Color.FromArgb(179, 229, 252),
+                           Color.FromArgb(248, 187, 208), Color.FromArgb(255, 204, 128), Color.FromArgb(225, 190, 231), Color.FromArgb(224, 224, 224) };
+            string[] hn = { "노랑", "연두", "하늘", "분홍", "주황", "보라", "회색" };
+            hiBtn = new ToolStripSplitButton("형광펜");
+            hiBtn.Image = MakeSwatch(lastHi);
+            hiBtn.ToolTipText = "형광펜 (음영)";
+            hiBtn.ButtonClick += new EventHandler(HiBtn_Click);
+            AddColorItems(hiBtn, hc, hn, new EventHandler(HiPick_Click), true);
+            ToolStripMenuItem none = new ToolStripMenuItem("형광펜 없음");
+            none.Tag = Color.Empty;
+            none.Click += new EventHandler(HiPick_Click);
+            hiBtn.DropDownItems.Add(none);
+            tool.Items.Add(hiBtn);
+
+            Color[] bc = { Color.White, Color.FromArgb(255, 251, 234), Color.FromArgb(255, 249, 196), Color.FromArgb(232, 245, 233),
+                           Color.FromArgb(227, 242, 253), Color.FromArgb(243, 229, 245), Color.FromArgb(252, 228, 236), Color.FromArgb(245, 245, 245) };
+            string[] bn = { "흰색", "아이보리", "연노랑", "연두", "하늘", "연보라", "연분홍", "연회색" };
+            bgBtn = new ToolStripDropDownButton("배경");
+            bgBtn.Image = MakeSwatch(Color.White);
+            bgBtn.ToolTipText = "페이지 배경색";
+            AddColorItems(bgBtn, bc, bn, new EventHandler(BgPick_Click), true);
+            tool.Items.Add(bgBtn);
+            tool.Items.Add(new ToolStripSeparator());
+
+            AddBtn("□ 할일", "할 일 체크박스 (Ctrl+1)  /  [] 입력", new EventHandler(Todo_Click));
+            AddBtn("• 목록", "글머리 기호 (Ctrl+.)  /  줄 처음에 - 입력 후 스페이스", new EventHandler(Bullet_Click));
+            tool.Items.Add(new ToolStripSeparator());
+            AddBtn("찾기", "찾기 (Ctrl+F) / 바꾸기 (Ctrl+H)", new EventHandler(Find_Click));
+        }
+
+        ToolStripButton AddBtn(string text, string tip, EventHandler h)
+        {
+            ToolStripButton b = new ToolStripButton(text);
+            b.ToolTipText = tip;
+            b.Click += h;
+            tool.Items.Add(b);
+            return b;
+        }
+
+        void AddMenu(ToolStripDropDownItem parent, string text, object tag, EventHandler h)
+        {
+            ToolStripMenuItem mi = new ToolStripMenuItem(text);
+            mi.Tag = tag;
+            mi.Click += h;
+            parent.DropDownItems.Add(mi);
+        }
+
+        void AddColorItems(ToolStripDropDownItem parent, Color[] colors, string[] names, EventHandler h, bool addCustom)
+        {
+            for (int i = 0; i < colors.Length; i++)
+            {
+                ToolStripMenuItem mi = new ToolStripMenuItem(names[i], MakeSwatch(colors[i]));
+                mi.Tag = colors[i];
+                mi.Click += h;
+                parent.DropDownItems.Add(mi);
+            }
+            if (addCustom)
+            {
+                ToolStripMenuItem more = new ToolStripMenuItem("다른 색...");
+                more.Tag = null;
+                more.Click += h;
+                parent.DropDownItems.Add(more);
+            }
+        }
+
+        Bitmap MakeSwatch(Color c)
+        {
+            int n = Px(16);
+            Bitmap b = new Bitmap(n, n);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.Transparent);
+                using (SolidBrush br = new SolidBrush(c)) g.FillRectangle(br, 1, 1, n - 2, n - 2);
+                g.DrawRectangle(Pens.Gray, 1, 1, n - 3, n - 3);
+            }
+            return b;
+        }
+
+        Icon MakeIcon()
+        {
+            try
+            {
+                Bitmap b = new Bitmap(32, 32);
+                using (Graphics g = Graphics.FromImage(b))
+                {
+                    g.Clear(THEME);
+                    using (Font f = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Pixel))
+                    {
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                        g.DrawString("A", f, Brushes.White, 8, 5);
+                    }
+                }
+                return Icon.FromHandle(b.GetHicon());
+            }
+            catch { return null; }
+        }
+
+        void BuildStatus()
+        {
+            status = new StatusStrip();
+            status.SizingGrip = false;
+            status.Font = new Font(FONT_NAME, 9f);
+            status.BackColor = Color.FromArgb(250, 250, 250);
+            stLeft = new ToolStripStatusLabel();
+            stLeft.Spring = true;
+            stLeft.TextAlign = ContentAlignment.MiddleLeft;
+            stRight = new ToolStripStatusLabel();
+            status.Items.Add(stLeft);
+            status.Items.Add(stRight);
+        }
+
+        void BuildMenus()
+        {
+            nbMenu = new ContextMenuStrip();
+            nbMenu.Items.Add("새 노트북", null, new EventHandler(NewNotebook_Click));
+            nbMenu.Items.Add("이름 바꾸기 (F2)", null, new EventHandler(RenameNotebook_Click));
+            nbMenu.Items.Add("위로 이동 (Alt+↑)", null, new EventHandler(NbUp_Click));
+            nbMenu.Items.Add("아래로 이동 (Alt+↓)", null, new EventHandler(NbDown_Click));
+            nbMenu.Items.Add(new ToolStripSeparator());
+            nbMenu.Items.Add("삭제 (Del)", null, new EventHandler(DeleteNotebook_Click));
+            nbList.ContextMenuStrip = nbMenu;
+
+            pgMenu = new ContextMenuStrip();
+            pgMenu.Items.Add("새 페이지 (Ctrl+N)", null, new EventHandler(NewPage_Click));
+            pgMenu.Items.Add("이름 바꾸기 (F2)", null, new EventHandler(RenamePage_Click));
+            pgMenu.Items.Add("위로 이동 (Alt+↑)", null, new EventHandler(PgUp_Click));
+            pgMenu.Items.Add("아래로 이동 (Alt+↓)", null, new EventHandler(PgDown_Click));
+            moveToMenu = new ToolStripMenuItem("다른 노트북으로 이동");
+            pgMenu.Items.Add(moveToMenu);
+            pgMenu.Items.Add(new ToolStripSeparator());
+            pgMenu.Items.Add("삭제 (Del)", null, new EventHandler(DeletePage_Click));
+            pgMenu.Opening += new System.ComponentModel.CancelEventHandler(PgMenu_Opening);
+            pgList.ContextMenuStrip = pgMenu;
+
+            edMenu = new ContextMenuStrip();
+            edMenu.Items.Add("잘라내기 (Ctrl+X)", null, new EventHandler(Cut_Click));
+            edMenu.Items.Add("복사 (Ctrl+C)", null, new EventHandler(Copy_Click));
+            edMenu.Items.Add("붙여넣기 (Ctrl+V)", null, new EventHandler(Paste_Click));
+            edMenu.Items.Add("텍스트만 붙여넣기 (Ctrl+Shift+V)", null, new EventHandler(PastePlain_Click));
+            edMenu.Items.Add(new ToolStripSeparator());
+            edMenu.Items.Add("모두 선택 (Ctrl+A)", null, new EventHandler(SelectAll_Click));
+            ed.ContextMenuStrip = edMenu;
+        }
+
+        // ================= 시작 / 종료 =================
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            try { split1.SplitterDistance = Px(190); } catch { }
+            try { split2.SplitterDistance = Px(230); } catch { }
+
+            dataDir = Path.Combine(Application.StartupPath, DATA_FOLDER);
+            if (!CanWrite(dataDir))
+                dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AHNNOTE");
+            Directory.CreateDirectory(dataDir);
+
+            LoadNotebooks();
+            bool first = nbOrder.Count == 0;
+            if (first)
+            {
+                Directory.CreateDirectory(NbDir("내 노트북"));
+                CreatePageFile("내 노트북", "AHNNOTE 사용법");
+                LoadNotebooks();
+            }
+
+            string stNb = null, stPg = null;
+            try
+            {
+                string sf = Path.Combine(dataDir, "_state.txt");
+                if (File.Exists(sf))
+                {
+                    string[] st = File.ReadAllLines(sf, Encoding.UTF8);
+                    if (st.Length > 0) stNb = st[0];
+                    if (st.Length > 1) stPg = st[1];
+                }
+            }
+            catch { }
+
+            int i = FillList(nbList, nbOrder, stNb);
+            OpenNotebook(nbOrder[i], stPg);
+            if (first)
+            {
+                WriteWelcome();
+                dirty = true;
+                SaveCurrent();
+            }
+            ed.Focus();
+        }
+
+        bool CanWrite(string dir)
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string t = Path.Combine(dir, "_write_test.tmp");
+                File.WriteAllText(t, "ok");
+                File.Delete(t);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            CommitTitle();
+            SaveCurrent();
+            SaveState();
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            SaveCurrent();
+        }
+
+        void SaveTimer_Tick(object sender, EventArgs e)
+        {
+            if (dirty) SaveCurrent();
+            UpdateStatus();
+        }
+
+        // ================= 단축키 =================
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            switch (keyData)
+            {
+                case Keys.Control | Keys.S: dirty = true; SaveCurrent(); UpdateStatus(); return true;
+                case Keys.Control | Keys.N: NewPage(); return true;
+                case Keys.Control | Keys.Shift | Keys.N: NewNotebook(); return true;
+                case Keys.Control | Keys.F: ShowFind(false); return true;
+                case Keys.Control | Keys.H: ShowFind(true); return true;
+                case Keys.F3: FindAgain(true); return true;
+                case Keys.Shift | Keys.F3: FindAgain(false); return true;
+            }
+
+            if (ed.Focused)
+            {
+                switch (keyData)
+                {
+                    case Keys.Control | Keys.B: ToggleStyle(FontStyle.Bold); return true;
+                    case Keys.Control | Keys.I: ToggleStyle(FontStyle.Italic); return true;
+                    case Keys.Control | Keys.U: ToggleStyle(FontStyle.Underline); return true;
+                    case Keys.Control | Keys.OemMinus: ToggleStyle(FontStyle.Strikeout); return true;
+                    case Keys.Control | Keys.A: ed.SelectAll(); return true;
+                    case Keys.Control | Keys.Shift | Keys.V: PastePlain(); return true;
+                    case Keys.Control | Keys.Y: ed.Redo(); return true;
+                    case Keys.Control | Keys.Shift | Keys.Z: ed.Redo(); return true;
+                    case Keys.Control | Keys.D1: ToggleTodo(); return true;
+                    case Keys.Control | Keys.OemPeriod: ToggleBullet(); return true;
+                    case Keys.Control | Keys.Alt | Keys.D1: SetHeading(1); return true;
+                    case Keys.Control | Keys.Alt | Keys.D2: SetHeading(2); return true;
+                    case Keys.Control | Keys.Alt | Keys.D3: SetHeading(3); return true;
+                    case Keys.Control | Keys.Alt | Keys.D0: SetHeading(0); return true;
+                    case Keys.Control | Keys.Shift | Keys.OemPeriod: ApplyFont(MODE_GROW, FontStyle.Regular, false, 1f); return true;
+                    case Keys.Control | Keys.Shift | Keys.Oemcomma: ApplyFont(MODE_GROW, FontStyle.Regular, false, -1f); return true;
+                    case Keys.Control | Keys.D0: ed.ZoomFactor = 1f; return true;
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // ================= 저장 파일 =================
+
+        string NbDir(string nb) { return Path.Combine(dataDir, nb); }
+        string PagePath(string nb, string pg) { return Path.Combine(NbDir(nb), pg + ".rtf"); }
+        string NbMetaFile() { return Path.Combine(dataDir, "_notebooks.txt"); }
+        string PgMetaFile(string nb) { return Path.Combine(NbDir(nb), "_pages.txt"); }
+
+        List<string> ReadMeta(string file, Dictionary<string, string> vals)
+        {
+            List<string> list = new List<string>();
+            try
+            {
+                if (!File.Exists(file)) return list;
+                foreach (string line in File.ReadAllLines(file, Encoding.UTF8))
+                {
+                    if (line.Length == 0) continue;
+                    string name = line;
+                    int tab = line.IndexOf('\t');
+                    if (tab >= 0)
+                    {
+                        name = line.Substring(0, tab);
+                        if (vals != null) vals[name] = line.Substring(tab + 1);
+                    }
+                    list.Add(name);
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        void WriteMeta(string file, List<string> list, Dictionary<string, string> vals)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (string n in list)
+                {
+                    sb.Append(n);
+                    string v;
+                    if (vals != null && vals.TryGetValue(n, out v)) sb.Append('\t').Append(v);
+                    sb.Append("\r\n");
+                }
+                File.WriteAllText(file, sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        static int IndexOfName(List<string> list, string name)
+        {
+            if (name == null) return -1;
+            for (int i = 0; i < list.Count; i++)
+                if (string.Equals(list[i], name, StringComparison.OrdinalIgnoreCase)) return i;
+            return -1;
+        }
+
+        static List<string> MergeOrder(List<string> meta, List<string> actual)
+        {
+            List<string> result = new List<string>();
+            foreach (string m in meta)
+            {
+                int i = IndexOfName(actual, m);
+                if (i >= 0 && IndexOfName(result, actual[i]) < 0) result.Add(actual[i]);
+            }
+            List<string> rest = new List<string>();
+            foreach (string a in actual)
+                if (IndexOfName(result, a) < 0) rest.Add(a);
+            rest.Sort(StringComparer.CurrentCultureIgnoreCase);
+            result.AddRange(rest);
+            return result;
+        }
+
+        static string UniqueName(List<string> list, string baseName)
+        {
+            if (IndexOfName(list, baseName) < 0) return baseName;
+            int n = 2;
+            while (IndexOfName(list, baseName + " (" + n + ")") >= 0) n++;
+            return baseName + " (" + n + ")";
+        }
+
+        static string CleanName(string s)
+        {
+            if (s == null) return "";
+            StringBuilder sb = new StringBuilder();
+            char[] bad = Path.GetInvalidFileNameChars();
+            foreach (char c in s)
+                sb.Append(Array.IndexOf(bad, c) >= 0 ? '_' : c);
+            string r = sb.ToString().Trim().TrimEnd('.');
+            if (r.Length > 80) r = r.Substring(0, 80).Trim();
+            if (r == TRASH || r.StartsWith("_")) r = "-" + r.TrimStart('_');
+            return r;
+        }
+
+        List<string> PageFiles(string nb)
+        {
+            List<string> list = new List<string>();
+            try
+            {
+                foreach (string f in Directory.GetFiles(NbDir(nb), "*.rtf"))
+                    if (string.Equals(Path.GetExtension(f), ".rtf", StringComparison.OrdinalIgnoreCase))
+                        list.Add(Path.GetFileNameWithoutExtension(f));
+            }
+            catch { }
+            return list;
+        }
+
+        void LoadNotebooks()
+        {
+            List<string> actual = new List<string>();
+            foreach (string d in Directory.GetDirectories(dataDir))
+            {
+                string n = Path.GetFileName(d);
+                if (n == TRASH || n.StartsWith(".") || n.StartsWith("_")) continue;
+                actual.Add(n);
+            }
+            nbOrder = MergeOrder(ReadMeta(NbMetaFile(), null), actual);
+        }
+
+        void LoadPages(string nb)
+        {
+            pgBg = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            List<string> meta = ReadMeta(PgMetaFile(nb), pgBg);
+            pgOrder = MergeOrder(meta, PageFiles(nb));
+        }
+
+        void SaveNbMeta() { WriteMeta(NbMetaFile(), nbOrder, null); }
+        void SavePgMeta() { if (curNotebook != null) WriteMeta(PgMetaFile(curNotebook), pgOrder, pgBg); }
+
+        void SaveState()
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(dataDir, "_state.txt"),
+                    (curNotebook == null ? "" : curNotebook) + "\r\n" + (curPage == null ? "" : curPage), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        void CreatePageFile(string nb, string pg)
+        {
+            File.WriteAllText(PagePath(nb, pg), "{\\rtf1\\ansi\\deff0 }", Encoding.ASCII);
+        }
+
+        string TrashPath(string name)
+        {
+            string t = Path.Combine(dataDir, TRASH);
+            Directory.CreateDirectory(t);
+            return Path.Combine(t, name + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+        }
+
+        static void MoveDir(string a, string b)
+        {
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+            {
+                string tmp = a + "_ren_tmp";
+                Directory.Move(a, tmp);
+                Directory.Move(tmp, b);
+            }
+            else Directory.Move(a, b);
+        }
+
+        static void MoveFile(string a, string b)
+        {
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+            {
+                string tmp = a + ".ren_tmp";
+                File.Move(a, tmp);
+                File.Move(tmp, b);
+            }
+            else File.Move(a, b);
+        }
+
+        // ================= 목록 =================
+
+        int FillList(ListBox lb, List<string> items, string select)
+        {
+            listBusy = true;
+            lb.BeginUpdate();
+            lb.Items.Clear();
+            foreach (string s in items) lb.Items.Add(s);
+            lb.EndUpdate();
+            int i = IndexOfName(items, select);
+            if (i < 0 && items.Count > 0) i = 0;
+            lb.SelectedIndex = i;
+            listBusy = false;
+            return i;
+        }
+
+        void List_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            ListBox lb = (ListBox)sender;
+            if (e.Index < 0 || e.Index >= lb.Items.Count) return;
+            bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            using (SolidBrush b = new SolidBrush(sel ? SEL_BACK : lb.BackColor))
+                e.Graphics.FillRectangle(b, e.Bounds);
+            int x = e.Bounds.X + Px(12);
+            if (lb == nbList)
+            {
+                int d = Px(10);
+                Color c = NB_COLORS[e.Index % NB_COLORS.Length];
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (SolidBrush b = new SolidBrush(c))
+                    e.Graphics.FillRectangle(b, x, e.Bounds.Y + (e.Bounds.Height - d) / 2, d, d);
+                x += Px(20);
+            }
+            if (sel)
+            {
+                using (SolidBrush b = new SolidBrush(THEME))
+                    e.Graphics.FillRectangle(b, e.Bounds.X, e.Bounds.Y, Px(4), e.Bounds.Height);
+            }
+            Rectangle r = new Rectangle(x, e.Bounds.Y, e.Bounds.Right - x - Px(4), e.Bounds.Height);
+            Font f = sel ? new Font(lb.Font, FontStyle.Bold) : lb.Font;
+            TextRenderer.DrawText(e.Graphics, lb.Items[e.Index].ToString(), f, r, Color.FromArgb(40, 40, 40),
+                TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            if (sel) f.Dispose();
+        }
+
+        void List_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            ListBox lb = (ListBox)sender;
+            int i = lb.IndexFromPoint(e.Location);
+            if (i >= 0 && i != lb.SelectedIndex) lb.SelectedIndex = i;
+        }
+
+        void NbList_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (listBusy || nbList.SelectedIndex < 0) return;
+            string nb = nbOrder[nbList.SelectedIndex];
+            if (nb == curNotebook) return;
+            OpenNotebook(nb, null);
+        }
+
+        void PgList_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (listBusy || pgList.SelectedIndex < 0) return;
+            string pg = pgOrder[pgList.SelectedIndex];
+            if (pg == curPage) return;
+            OpenPage(pg);
+        }
+
+        void NbList_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.F2) { RenameNotebook(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Delete) { DeleteNotebook(); e.Handled = true; }
+            else if (e.Alt && e.KeyCode == Keys.Up) { MoveNotebook(-1); e.Handled = true; }
+            else if (e.Alt && e.KeyCode == Keys.Down) { MoveNotebook(1); e.Handled = true; }
+        }
+
+        void PgList_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.F2) { RenamePage(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Delete) { DeletePage(); e.Handled = true; }
+            else if (e.Alt && e.KeyCode == Keys.Up) { MovePage(-1); e.Handled = true; }
+            else if (e.Alt && e.KeyCode == Keys.Down) { MovePage(1); e.Handled = true; }
+            else if (e.KeyCode == Keys.Enter) { ed.Focus(); e.Handled = true; }
+        }
+
+        // ================= 노트북 =================
+
+        void OpenNotebook(string nb, string page)
+        {
+            CommitTitle();
+            SaveCurrent();
+            curNotebook = nb;
+            curPage = null;
+            Directory.CreateDirectory(NbDir(nb));
+            LoadPages(nb);
+            if (pgOrder.Count == 0)
+            {
+                CreatePageFile(nb, "새 페이지");
+                LoadPages(nb);
+            }
+            int i = FillList(pgList, pgOrder, page);
+            OpenPage(pgOrder[i]);
+        }
+
+        void NewNotebook()
+        {
+            string name = InputDialog.Ask(this, "새 노트북", "노트북 이름:", UniqueName(nbOrder, "새 노트북"));
+            if (name == null) return;
+            name = CleanName(name);
+            if (name.Length == 0) return;
+            if (IndexOfName(nbOrder, name) >= 0) { MessageBox.Show(this, "같은 이름의 노트북이 이미 있습니다.", "AHNNOTE"); return; }
+            try { Directory.CreateDirectory(NbDir(name)); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "AHNNOTE"); return; }
+            nbOrder.Add(name);
+            SaveNbMeta();
+            FillList(nbList, nbOrder, name);
+            OpenNotebook(name, null);
+            titleBox.Focus();
+            titleBox.SelectAll();
+        }
+
+        void RenameNotebook()
+        {
+            int idx = nbList.SelectedIndex;
+            if (idx < 0) return;
+            string old = nbOrder[idx];
+            string name = InputDialog.Ask(this, "노트북 이름 바꾸기", "새 이름:", old);
+            if (name == null) return;
+            name = CleanName(name);
+            if (name.Length == 0 || name == old) return;
+            int other = IndexOfName(nbOrder, name);
+            if (other >= 0 && other != idx) { MessageBox.Show(this, "같은 이름의 노트북이 이미 있습니다.", "AHNNOTE"); return; }
+            CommitTitle();
+            SaveCurrent();
+            try { MoveDir(NbDir(old), NbDir(name)); }
+            catch (Exception ex) { MessageBox.Show(this, "이름을 바꿀 수 없습니다.\n" + ex.Message, "AHNNOTE"); return; }
+            nbOrder[idx] = name;
+            SaveNbMeta();
+            if (curNotebook == old) curNotebook = name;
+            FillList(nbList, nbOrder, name);
+            SaveState();
+            UpdateStatus();
+        }
+
+        void DeleteNotebook()
+        {
+            int idx = nbList.SelectedIndex;
+            if (idx < 0) return;
+            string nb = nbOrder[idx];
+            if (MessageBox.Show(this, "'" + nb + "' 노트북을 삭제할까요?\n(" + TRASH + " 폴더로 옮겨집니다)", "AHNNOTE",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            SaveCurrent();
+            try { Directory.Move(NbDir(nb), TrashPath(nb)); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "AHNNOTE"); return; }
+            curNotebook = null;
+            curPage = null;
+            nbOrder.RemoveAt(idx);
+            if (nbOrder.Count == 0)
+            {
+                Directory.CreateDirectory(NbDir("내 노트북"));
+                nbOrder.Add("내 노트북");
+            }
+            SaveNbMeta();
+            int i = Math.Min(idx, nbOrder.Count - 1);
+            FillList(nbList, nbOrder, nbOrder[i]);
+            OpenNotebook(nbOrder[i], null);
+        }
+
+        void MoveNotebook(int delta)
+        {
+            int i = nbList.SelectedIndex;
+            int j = i + delta;
+            if (i < 0 || j < 0 || j >= nbOrder.Count) return;
+            string t = nbOrder[i]; nbOrder[i] = nbOrder[j]; nbOrder[j] = t;
+            SaveNbMeta();
+            FillList(nbList, nbOrder, t);
+        }
+
+        // ================= 페이지 =================
+
+        void OpenPage(string pg)
+        {
+            CommitTitle();
+            SaveCurrent();
+            curPage = pg;
+            loading = true;
+            string path = PagePath(curNotebook, pg);
+            try
+            {
+                if (File.Exists(path)) ed.LoadFile(path, RichTextBoxStreamType.RichText);
+                else ed.Clear();
+            }
+            catch
+            {
+                try { ed.LoadFile(path, RichTextBoxStreamType.PlainText); } catch { ed.Clear(); }
+            }
+            if (ed.TextLength == 0)
+            {
+                ed.SelectAll();
+                ed.SelectionFont = baseFont;
+                ed.SelectionColor = Color.Black;
+            }
+            ed.Select(0, 0);
+            ed.ClearUndo();
+
+            Color bg = Color.White;
+            string v;
+            if (pgBg.TryGetValue(pg, out v))
+            {
+                int argb;
+                if (int.TryParse(v, out argb)) bg = Color.FromArgb(argb);
+            }
+            ApplyBgColor(bg);
+
+            titleBox.Text = pg;
+            try { dateLabel.Text = File.GetCreationTime(path).ToString("yyyy년 M월 d일 dddd  tt h:mm"); }
+            catch { dateLabel.Text = ""; }
+
+            ed.Modified = false;
+            dirty = false;
+            loading = false;
+            SaveState();
+            UpdateStatus();
+            UpdateToolbar();
+        }
+
+        void SaveCurrent()
+        {
+            if (curNotebook == null || curPage == null) return;
+            if (!dirty && !ed.Modified) return;
+            string path = PagePath(curNotebook, curPage);
+            string tmp = path + ".tmp";
+            try
+            {
+                ed.SaveFile(tmp, RichTextBoxStreamType.RichText);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+                dirty = false;
+                ed.Modified = false;
+                lastSaved = DateTime.Now.ToString("HH:mm:ss");
+            }
+            catch (Exception ex)
+            {
+                stLeft.Text = "저장 실패: " + ex.Message;
+            }
+        }
+
+        void NewPage()
+        {
+            if (curNotebook == null) return;
+            CommitTitle();
+            SaveCurrent();
+            string name = UniqueName(pgOrder, "새 페이지");
+            try { CreatePageFile(curNotebook, name); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "AHNNOTE"); return; }
+            int at = IndexOfName(pgOrder, curPage) + 1;
+            if (at <= 0) at = pgOrder.Count;
+            pgOrder.Insert(at, name);
+            SavePgMeta();
+            FillList(pgList, pgOrder, name);
+            OpenPage(name);
+            titleBox.Focus();
+            titleBox.SelectAll();
+        }
+
+        void RenamePage()
+        {
+            titleBox.Focus();
+            titleBox.SelectAll();
+        }
+
+        void CommitTitle()
+        {
+            if (curNotebook == null || curPage == null) return;
+            if (titleBox.Text == curPage) return;
+            string nn = CleanName(titleBox.Text);
+            if (nn.Length == 0 || nn == curPage) { titleBox.Text = curPage; return; }
+            int me = IndexOfName(pgOrder, curPage);
+            int other = IndexOfName(pgOrder, nn);
+            if (other >= 0 && other != me)
+            {
+                MessageBox.Show(this, "같은 이름의 페이지가 이미 있습니다.", "AHNNOTE");
+                titleBox.Text = curPage;
+                return;
+            }
+            SaveCurrent();
+            try { MoveFile(PagePath(curNotebook, curPage), PagePath(curNotebook, nn)); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "이름을 바꿀 수 없습니다.\n" + ex.Message, "AHNNOTE");
+                titleBox.Text = curPage;
+                return;
+            }
+            string bg;
+            if (pgBg.TryGetValue(curPage, out bg)) { pgBg.Remove(curPage); pgBg[nn] = bg; }
+            if (me >= 0) pgOrder[me] = nn;
+            curPage = nn;
+            SavePgMeta();
+            titleBox.Text = nn;
+            if (me >= 0) FillList(pgList, pgOrder, nn);
+            SaveState();
+            UpdateStatus();
+        }
+
+        void TitleBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Down)
+            {
+                e.SuppressKeyPress = true;
+                ed.Focus();
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                e.SuppressKeyPress = true;
+                titleBox.Text = curPage;
+                ed.Focus();
+            }
+        }
+
+        void TitleBox_Leave(object sender, EventArgs e) { CommitTitle(); }
+
+        void DeletePage()
+        {
+            if (curPage == null) return;
+            if (MessageBox.Show(this, "'" + curPage + "' 페이지를 삭제할까요?\n(" + TRASH + " 폴더로 옮겨집니다)", "AHNNOTE",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            titleBox.Text = curPage;
+            SaveCurrent();
+            int idx = IndexOfName(pgOrder, curPage);
+            try { File.Move(PagePath(curNotebook, curPage), TrashPath(curNotebook + "_" + curPage) + ".rtf"); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "AHNNOTE"); return; }
+            pgBg.Remove(curPage);
+            if (idx >= 0) pgOrder.RemoveAt(idx);
+            curPage = null;
+            if (pgOrder.Count == 0)
+            {
+                CreatePageFile(curNotebook, "새 페이지");
+                pgOrder.Add("새 페이지");
+            }
+            SavePgMeta();
+            int i = Math.Max(0, Math.Min(idx, pgOrder.Count - 1));
+            FillList(pgList, pgOrder, pgOrder[i]);
+            OpenPage(pgOrder[i]);
+        }
+
+        void MovePage(int delta)
+        {
+            int i = IndexOfName(pgOrder, curPage);
+            int j = i + delta;
+            if (i < 0 || j < 0 || j >= pgOrder.Count) return;
+            string t = pgOrder[i]; pgOrder[i] = pgOrder[j]; pgOrder[j] = t;
+            SavePgMeta();
+            FillList(pgList, pgOrder, curPage);
+        }
+
+        void MovePageTo(string target)
+        {
+            if (curPage == null || target == curNotebook) return;
+            CommitTitle();
+            SaveCurrent();
+            Dictionary<string, string> tv = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            List<string> tactual = PageFiles(target);
+            List<string> tmeta = MergeOrder(ReadMeta(PgMetaFile(target), tv), tactual);
+            string nn = UniqueName(tactual, curPage);
+            try { File.Move(PagePath(curNotebook, curPage), PagePath(target, nn)); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "AHNNOTE"); return; }
+            tmeta.Add(nn);
+            string bg;
+            if (pgBg.TryGetValue(curPage, out bg)) { tv[nn] = bg; pgBg.Remove(curPage); }
+            WriteMeta(PgMetaFile(target), tmeta, tv);
+
+            int idx = IndexOfName(pgOrder, curPage);
+            if (idx >= 0) pgOrder.RemoveAt(idx);
+            curPage = null;
+            SavePgMeta();
+            string sel = null;
+            if (pgOrder.Count > 0) sel = pgOrder[Math.Max(0, Math.Min(idx, pgOrder.Count - 1))];
+            OpenNotebook(curNotebook, sel);
+            stLeft.Text = "'" + nn + "' 페이지를 '" + target + "' 노트북으로 옮겼습니다.";
+        }
+
+        void PgMenu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            moveToMenu.DropDownItems.Clear();
+            foreach (string nb in nbOrder)
+            {
+                if (nb == curNotebook) continue;
+                ToolStripMenuItem mi = new ToolStripMenuItem(nb);
+                mi.Tag = nb;
+                mi.Click += new EventHandler(MoveTo_Click);
+                moveToMenu.DropDownItems.Add(mi);
+            }
+            moveToMenu.Enabled = moveToMenu.DropDownItems.Count > 0;
+        }
+
+        void ApplyBgColor(Color c)
+        {
+            ed.BackColor = c;
+            pagePanel.BackColor = c;
+            titleBox.BackColor = c;
+            dateLabel.BackColor = c;
+            bgBtn.Image = MakeSwatch(c);
+        }
+
+        void SetPageBg(Color c)
+        {
+            if (curPage == null) return;
+            ApplyBgColor(c);
+            if (c.ToArgb() == Color.White.ToArgb()) pgBg.Remove(curPage);
+            else pgBg[curPage] = c.ToArgb().ToString();
+            SavePgMeta();
+        }
+
+        // ================= 편집기 =================
+
+        // 선택 영역 글꼴 (글꼴이 섞여 있으면 null)
+        Font SelFont()
+        {
+            try { return ed.SelectionFont; }
+            catch { return null; }
+        }
+
+        void MarkDirty()
+        {
+            if (!loading) dirty = true;
+        }
+
+        void Ed_TextChanged(object sender, EventArgs e) { MarkDirty(); }
+
+        void Ed_SelectionChanged(object sender, EventArgs e)
+        {
+            if (!uiBusy && !loading) UpdateToolbar();
+        }
+
+        void UpdateToolbar()
+        {
+            uiBusy = true;
+            Font f = SelFont();
+            boldBtn.Checked = f != null && f.Bold;
+            italicBtn.Checked = f != null && f.Italic;
+            underBtn.Checked = f != null && f.Underline;
+            strikeBtn.Checked = f != null && f.Strikeout;
+            sizeBox.Text = f != null ? f.Size.ToString("0.#") : "";
+            uiBusy = false;
+        }
+
+        void UpdateStatus()
+        {
+            if (curNotebook == null) return;
+            Text = "AHNNOTE - " + curNotebook + " / " + curPage;
+            string s = curNotebook + "  ›  " + curPage;
+            if (lastSaved.Length > 0) s += "      ✔ 저장됨 " + lastSaved;
+            stLeft.Text = s;
+            stRight.Text = "글자 수 " + ed.TextLength + "   확대 " + (int)Math.Round(ed.ZoomFactor * 100) + "%";
+        }
+
+        Font MakeFont(Font f, int mode, FontStyle st, bool on, float val)
+        {
+            FontStyle ns = f.Style;
+            float sz = f.Size;
+            if (mode == MODE_STYLE) ns = on ? (ns | st) : (ns & ~st);
+            else if (mode == MODE_SIZE) sz = val;
+            else if (mode == MODE_GROW) sz = Math.Max(6f, Math.Min(96f, f.Size + val));
+            try { return new Font(f.FontFamily, sz, ns); }
+            catch { return f; }
+        }
+
+        void SetRedraw(bool on)
+        {
+            try
+            {
+                SendMessage(ed.Handle, WM_SETREDRAW, (IntPtr)(on ? 1 : 0), IntPtr.Zero);
+                if (on) ed.Invalidate();
+            }
+            catch { }
+        }
+
+        // 선택 영역에 글꼴 변경 적용 (글꼴이 섞여 있어도 각각 유지)
+        void ApplyFont(int mode, FontStyle st, bool on, float val)
+        {
+            int s = ed.SelectionStart, len = ed.SelectionLength;
+            Font f = SelFont();
+            if (len == 0 || f != null)
+            {
+                if (f == null) f = baseFont;
+                ed.SelectionFont = MakeFont(f, mode, st, on, val);
+            }
+            else
+            {
+                uiBusy = true;
+                SetRedraw(false);
+                int i = s, end = s + len;
+                while (i < end)
+                {
+                    int n = end - i;
+                    ed.Select(i, n);
+                    while (n > 1 && SelFont() == null)
+                    {
+                        n = n / 2;
+                        ed.Select(i, n);
+                    }
+                    Font cf = SelFont();
+                    if (cf != null) ed.SelectionFont = MakeFont(cf, mode, st, on, val);
+                    i += n;
+                }
+                ed.Select(s, len);
+                SetRedraw(true);
+                uiBusy = false;
+            }
+            MarkDirty();
+            UpdateToolbar();
+        }
+
+        void ToggleStyle(FontStyle st)
+        {
+            Font f = SelFont();
+            bool on;
+            if (f != null) on = (f.Style & st) == 0;
+            else
+            {
+                int s = ed.SelectionStart, len = ed.SelectionLength;
+                uiBusy = true;
+                ed.Select(s, 1);
+                Font f0 = SelFont();
+                ed.Select(s, len);
+                uiBusy = false;
+                on = f0 == null || (f0.Style & st) == 0;
+            }
+            ApplyFont(MODE_STYLE, st, on, 0f);
+            ed.Focus();
+        }
+
+        void ClearHighlight()
+        {
+            try
+            {
+                CHARFORMAT2 cf = new CHARFORMAT2();
+                cf.cbSize = Marshal.SizeOf(typeof(CHARFORMAT2));
+                cf.dwMask = CFM_BACKCOLOR;
+                cf.dwEffects = CFM_BACKCOLOR; // CFE_AUTOBACKCOLOR
+                cf.szFaceName = "";
+                SendCharFormat(ed.Handle, EM_SETCHARFORMAT, (IntPtr)SCF_SELECTION, ref cf);
+            }
+            catch
+            {
+                ed.SelectionBackColor = ed.BackColor;
+            }
+            MarkDirty();
+        }
+
+        static int LineStart(string t, int pos)
+        {
+            if (pos > t.Length) pos = t.Length;
+            while (pos > 0 && t[pos - 1] != '\n') pos--;
+            return pos;
+        }
+
+        static int LineEnd(string t, int pos)
+        {
+            while (pos < t.Length && t[pos] != '\n') pos++;
+            return pos;
+        }
+
+        static bool Near(float a, float b) { return Math.Abs(a - b) < 0.1f; }
+
+        static float HeadingSize(int level)
+        {
+            if (level == 1) return 20f;
+            if (level == 2) return 16f;
+            if (level == 3) return 13f;
+            return BASE_SIZE;
+        }
+
+        static bool IsHeadingFont(Font f)
+        {
+            return f != null && f.Bold && (Near(f.Size, 20f) || Near(f.Size, 16f) || Near(f.Size, 13f));
+        }
+
+        // 현재 줄을 제목 1~3 / 본문(0)으로
+        void SetHeading(int level)
+        {
+            int s = ed.SelectionStart, len = ed.SelectionLength;
+            string t = ed.Text;
+            int ls = LineStart(t, s);
+            int le = LineEnd(t, Math.Min(s + len, t.Length));
+            Font hf = new Font(FONT_NAME, HeadingSize(level), level == 0 ? FontStyle.Regular : FontStyle.Bold);
+            uiBusy = true;
+            ed.Select(ls, le - ls);
+            ed.SelectionFont = hf;
+            ed.Select(s, len);
+            if (len == 0) ed.SelectionFont = hf;
+            uiBusy = false;
+            MarkDirty();
+            UpdateToolbar();
+        }
+
+        void InsertCheckbox()
+        {
+            Font cur = SelFont();
+            if (cur == null) cur = baseFont;
+            ed.SelectionFont = new Font(SYM_FONT, cur.Size, cur.Style & ~FontStyle.Underline);
+            ed.SelectedText = BOX;
+            ed.SelectionFont = cur;
+            ed.SelectedText = " ";
+        }
+
+        void ToggleCheckAt(int idx, char c)
+        {
+            int s0 = ed.SelectionStart, l0 = ed.SelectionLength;
+            uiBusy = true;
+            ed.Select(idx, 1);
+            ed.SelectedText = (c == '☐') ? BOX_ON : BOX;
+            ed.Select(s0, l0);
+            uiBusy = false;
+            MarkDirty();
+        }
+
+        void ToggleTodo()
+        {
+            string t = ed.Text;
+            int s0 = ed.SelectionStart, l0 = ed.SelectionLength;
+            int ls = LineStart(t, s0);
+            if (ls < t.Length && (t[ls] == '☐' || t[ls] == '☑'))
+            {
+                ToggleCheckAt(ls, t[ls]);
+            }
+            else
+            {
+                ed.Select(ls, 0);
+                InsertCheckbox();
+                ed.Select(s0 + 2, l0);
+            }
+            MarkDirty();
+        }
+
+        void ToggleBullet()
+        {
+            string t = ed.Text;
+            int s0 = ed.SelectionStart, l0 = ed.SelectionLength;
+            int ls = LineStart(t, s0);
+            if (t.Length >= ls + 2 && t.Substring(ls, 2) == BULLET)
+            {
+                ed.Select(ls, 2);
+                ed.SelectedText = "";
+                ed.Select(Math.Max(ls, s0 - 2), l0);
+            }
+            else
+            {
+                ed.Select(ls, 0);
+                ed.SelectedText = BULLET;
+                ed.Select(s0 + 2, l0);
+            }
+            MarkDirty();
+        }
+
+        void PastePlain()
+        {
+            try
+            {
+                if (Clipboard.ContainsText())
+                    ed.SelectedText = Clipboard.GetText().Replace("\r\n", "\n");
+            }
+            catch { }
+        }
+
+        // 엔터: 제목 다음 줄은 본문, 목록/할일 이어쓰기, --- 는 구분선
+        void Ed_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None || ed.SelectionLength > 0) return;
+            int pos = ed.SelectionStart;
+            string t = ed.Text;
+            if (pos > t.Length) return;
+            int ls = LineStart(t, pos);
+            int le = LineEnd(t, pos);
+            string line = t.Substring(ls, le - ls);
+
+            if (line == "---" && pos == le)
+            {
+                e.SuppressKeyPress = true;
+                ed.Select(ls, 3);
+                ed.SelectedText = new string('─', 30) + "\n";
+                MarkDirty();
+                return;
+            }
+
+            bool isBullet = line.StartsWith(BULLET);
+            bool isTodo = line.Length >= 2 && (line[0] == '☐' || line[0] == '☑') && line[1] == ' ';
+            if ((isBullet || isTodo) && pos >= ls + 2)
+            {
+                e.SuppressKeyPress = true;
+                if (line.Length == 2)
+                {
+                    // 빈 항목에서 엔터 → 목록 끝내기
+                    ed.Select(ls, 2);
+                    ed.SelectedText = "";
+                }
+                else
+                {
+                    ed.SelectedText = "\n";
+                    if (isBullet) ed.SelectedText = BULLET;
+                    else InsertCheckbox();
+                }
+                MarkDirty();
+                return;
+            }
+
+            if (pos == le && IsHeadingFont(SelFont()))
+            {
+                e.SuppressKeyPress = true;
+                ed.SelectedText = "\n";
+                ed.SelectionFont = baseFont;
+                MarkDirty();
+            }
+        }
+
+        // 입력하면서 바로 바꾸기 ([] → ☐, -> → →, # 제목 등)
+        void Ed_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (ed.SelectionLength > 0) return;
+            char c = e.KeyChar;
+            int pos = ed.SelectionStart;
+
+            if (c == ' ')
+            {
+                int vls = ed.GetFirstCharIndexOfCurrentLine();
+                int n = pos - vls;
+                if (n < 1 || n > 3) return;
+                string t0 = ed.Text;
+                if (pos > t0.Length) return;
+                int ls = LineStart(t0, pos);
+                string before = t0.Substring(ls, pos - ls);
+                if (before == "#" || before == "##" || before == "###")
+                {
+                    e.Handled = true;
+                    ed.Select(ls, before.Length);
+                    ed.SelectedText = "";
+                    SetHeading(before.Length);
+                }
+                else if (before == "-" || before == "*")
+                {
+                    e.Handled = true;
+                    ed.Select(ls, 1);
+                    ed.SelectedText = BULLET;
+                    MarkDirty();
+                }
+                return;
+            }
+
+            if (c != ']' && c != ')' && c != '>' && c != '-') return;
+            string t = ed.Text;
+            if (pos > t.Length) return;
+            int from = Math.Max(0, pos - 3);
+            string typed = t.Substring(from, pos - from) + c;
+
+            for (int i = 0; i < RULE_FROM.Length; i++)
+            {
+                string rf = RULE_FROM[i];
+                if (!typed.EndsWith(rf)) continue;
+                e.Handled = true;
+                Font cur = SelFont();
+                if (cur == null) cur = baseFont;
+                ed.SelectedText = c.ToString();   // 먼저 입력 (Ctrl+Z 하면 원래 글자로)
+                int start = pos + 1 - rf.Length;
+                ed.Select(start, rf.Length);
+                bool box = RULE_TO[i] == BOX || RULE_TO[i] == BOX_ON;
+                if (box) ed.SelectionFont = new Font(SYM_FONT, cur.Size, cur.Style & ~FontStyle.Underline);
+                ed.SelectedText = RULE_TO[i];
+                if (box) ed.SelectionFont = cur;
+                MarkDirty();
+                return;
+            }
+        }
+
+        // 체크박스 클릭하면 ☐ ↔ ☑
+        void Ed_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || ed.SelectionLength > 0) return;
+            int idx = ed.GetCharIndexFromPosition(e.Location);
+            string t = ed.Text;
+            if (idx < 0 || idx >= t.Length) return;
+            char c = t[idx];
+            if (c != '☐' && c != '☑') return;
+            Point p = ed.GetPositionFromCharIndex(idx);
+            int w = Px(16);
+            if (idx + 1 < t.Length)
+            {
+                Point p2 = ed.GetPositionFromCharIndex(idx + 1);
+                if (p2.Y == p.Y && p2.X > p.X) w = p2.X - p.X;
+            }
+            if (e.X >= p.X - 1 && e.X <= p.X + w && e.Y >= p.Y) ToggleCheckAt(idx, c);
+        }
+
+        void Ed_LinkClicked(object sender, LinkClickedEventArgs e)
+        {
+            try { System.Diagnostics.Process.Start(e.LinkText); } catch { }
+        }
+
+        // ================= 찾기 =================
+
+        void ShowFind(bool replace)
+        {
+            if (findForm == null) findForm = new FindForm(this, ed, S);
+            string sel = ed.SelectedText;
+            if (sel.Length > 0 && sel.IndexOf('\n') < 0 && sel.Length < 100) findForm.SetFindText(sel);
+            findForm.Open(replace);
+        }
+
+        void FindAgain(bool forward)
+        {
+            if (findForm == null || findForm.FindText.Length == 0) { ShowFind(false); return; }
+            findForm.FindNext(forward);
+        }
+
+        // ================= 시작 페이지 =================
+
+        void AddText(string text, float size, FontStyle st, Color fore, Color hi)
+        {
+            ed.Select(ed.TextLength, 0);
+            ed.SelectionFont = new Font(FONT_NAME, size, st);
+            ed.SelectionColor = fore;
+            if (hi.IsEmpty) ClearHighlight();
+            else ed.SelectionBackColor = hi;
+            ed.SelectedText = text;
+        }
+
+        void AddLine(string text) { AddText(text + "\n", BASE_SIZE, FontStyle.Regular, Color.Black, Color.Empty); }
+
+        void WriteWelcome()
+        {
+            Color none = Color.Empty;
+            ed.Clear();
+            AddText("AHNNOTE에 오신 것을 환영합니다\n", 20f, FontStyle.Bold, Color.Black, none);
+            AddLine("가벼운 노트 앱입니다. 왼쪽에서 노트북, 가운데에서 페이지를 고르세요. 내용은 자동 저장됩니다.");
+            AddLine("");
+            AddText("서식 단축키\n", 16f, FontStyle.Bold, Color.Black, none);
+            AddText("Ctrl+B", BASE_SIZE, FontStyle.Bold, Color.Black, none); AddLine("  굵게");
+            AddText("Ctrl+I", BASE_SIZE, FontStyle.Italic, Color.Black, none); AddLine("  기울임");
+            AddText("Ctrl+U", BASE_SIZE, FontStyle.Underline, Color.Black, none); AddLine("  밑줄");
+            AddText("Ctrl+-", BASE_SIZE, FontStyle.Strikeout, Color.Black, none); AddLine("  취소선");
+            AddText("글자색", BASE_SIZE, FontStyle.Regular, Color.FromArgb(224, 62, 62), none);
+            AddText(" / ", BASE_SIZE, FontStyle.Regular, Color.Black, none);
+            AddText("형광펜", BASE_SIZE, FontStyle.Regular, Color.Black, Color.FromArgb(255, 241, 118));
+            AddText(" / 배경 : 위 도구 모음에서 선택\n", BASE_SIZE, FontStyle.Regular, Color.Black, none);
+            AddLine("Ctrl+Alt+1~3  제목 1~3,  Ctrl+Alt+0  본문,  Ctrl+Shift+> <  글자 크기");
+            AddLine("");
+            AddText("기본 단축키\n", 16f, FontStyle.Bold, Color.Black, none);
+            AddLine("Ctrl+F 찾기,  Ctrl+H 바꾸기,  F3 다음 찾기");
+            AddLine("Ctrl+A 모두 선택,  Ctrl+C 복사,  Ctrl+X 잘라내기,  Ctrl+V 붙여넣기,  Ctrl+Shift+V 텍스트만 붙여넣기");
+            AddLine("Ctrl+Z 실행 취소,  Ctrl+Y 다시 실행,  Ctrl+S 저장");
+            AddLine("Ctrl+N 새 페이지,  Ctrl+Shift+N 새 노트북,  F2 이름 바꾸기,  Alt+↑↓ 순서 바꾸기");
+            AddLine("Ctrl+마우스 휠 확대/축소,  Ctrl+0 원래 크기");
+            AddLine("");
+            AddText("자동 변환 (입력하면 바로 바뀝니다)\n", 16f, FontStyle.Bold, Color.Black, none);
+            AddLine("[]  →  체크박스,   [x]  →  체크됨,   ()  →  ○");
+            AddLine("->  →  →,   <-  →  ←,   <->  →  ↔,   =>  →  ⇒,   <=>  →  ⇔");
+            AddLine("줄 처음에  #  ##  ###  + 스페이스  →  제목 1, 2, 3");
+            AddLine("줄 처음에  -  + 스페이스  →  • 글머리 목록");
+            AddLine("---  + 엔터  →  구분선");
+            AddLine("");
+            AddText("할 일 목록 (네모를 클릭해 보세요)\n", 13f, FontStyle.Bold, Color.Black, none);
+            ed.Select(ed.TextLength, 0); ed.SelectionFont = baseFont; ClearHighlight();
+            InsertCheckbox(); AddLine("AHNNOTE 빌드하기");
+            ed.Select(ed.TextLength, 0); ed.SelectionFont = baseFont;
+            InsertCheckbox(); AddLine("노트북 만들기");
+            ed.Select(ed.TextLength, 0); ed.SelectionFont = baseFont;
+            InsertCheckbox(); AddLine("Ctrl+1 로 체크박스 넣기");
+            int first = ed.Text.IndexOf('\u2610');
+            if (first >= 0) ToggleCheckAt(first, '☐');
+            ed.Select(0, 0);
+            ed.ClearUndo();
+        }
+
+        // ================= 이벤트 연결 =================
+
+        void NewNotebook_Click(object sender, EventArgs e) { NewNotebook(); }
+        void NewPage_Click(object sender, EventArgs e) { NewPage(); }
+        void RenameNotebook_Click(object sender, EventArgs e) { RenameNotebook(); }
+        void DeleteNotebook_Click(object sender, EventArgs e) { DeleteNotebook(); }
+        void NbUp_Click(object sender, EventArgs e) { MoveNotebook(-1); }
+        void NbDown_Click(object sender, EventArgs e) { MoveNotebook(1); }
+        void RenamePage_Click(object sender, EventArgs e) { RenamePage(); }
+        void DeletePage_Click(object sender, EventArgs e) { DeletePage(); }
+        void PgUp_Click(object sender, EventArgs e) { MovePage(-1); }
+        void PgDown_Click(object sender, EventArgs e) { MovePage(1); }
+        void MoveTo_Click(object sender, EventArgs e) { MovePageTo((string)((ToolStripItem)sender).Tag); }
+        void Bold_Click(object sender, EventArgs e) { ToggleStyle(FontStyle.Bold); }
+        void Italic_Click(object sender, EventArgs e) { ToggleStyle(FontStyle.Italic); }
+        void Under_Click(object sender, EventArgs e) { ToggleStyle(FontStyle.Underline); }
+        void Strike_Click(object sender, EventArgs e) { ToggleStyle(FontStyle.Strikeout); }
+        void Todo_Click(object sender, EventArgs e) { ToggleTodo(); ed.Focus(); }
+        void Bullet_Click(object sender, EventArgs e) { ToggleBullet(); ed.Focus(); }
+        void Find_Click(object sender, EventArgs e) { ShowFind(false); }
+        void Cut_Click(object sender, EventArgs e) { ed.Cut(); }
+        void Copy_Click(object sender, EventArgs e) { ed.Copy(); }
+        void Paste_Click(object sender, EventArgs e) { ed.Paste(); }
+        void PastePlain_Click(object sender, EventArgs e) { PastePlain(); }
+        void SelectAll_Click(object sender, EventArgs e) { ed.SelectAll(); }
+
+        void Heading_Click(object sender, EventArgs e)
+        {
+            SetHeading((int)((ToolStripItem)sender).Tag);
+            ed.Focus();
+        }
+
+        void ApplySizeBox()
+        {
+            float v;
+            if (float.TryParse(sizeBox.Text, out v) && v >= 1f && v <= 200f)
+            {
+                ApplyFont(MODE_SIZE, FontStyle.Regular, false, v);
+                ed.Focus();
+            }
+        }
+
+        void SizeBox_Changed(object sender, EventArgs e) { if (!uiBusy) ApplySizeBox(); }
+
+        void SizeBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ApplySizeBox(); }
+        }
+
+        Color PickColor(object tag, Color current)
+        {
+            if (tag is Color) return (Color)tag;
+            using (ColorDialog cd = new ColorDialog())
+            {
+                cd.FullOpen = true;
+                cd.Color = current;
+                if (cd.ShowDialog(this) == DialogResult.OK) return cd.Color;
+            }
+            return Color.Transparent;
+        }
+
+        void ForeBtn_Click(object sender, EventArgs e)
+        {
+            ed.SelectionColor = lastFore;
+            MarkDirty();
+            ed.Focus();
+        }
+
+        void ForePick_Click(object sender, EventArgs e)
+        {
+            Color c = PickColor(((ToolStripItem)sender).Tag, lastFore);
+            if (c == Color.Transparent) return;
+            lastFore = c;
+            foreBtn.Image = MakeSwatch(c);
+            ForeBtn_Click(sender, e);
+        }
+
+        void HiBtn_Click(object sender, EventArgs e)
+        {
+            ed.SelectionBackColor = lastHi;
+            MarkDirty();
+            ed.Focus();
+        }
+
+        void HiPick_Click(object sender, EventArgs e)
+        {
+            object tag = ((ToolStripItem)sender).Tag;
+            if (tag is Color && ((Color)tag).IsEmpty)
+            {
+                ClearHighlight();
+                ed.Focus();
+                return;
+            }
+            Color c = PickColor(tag, lastHi);
+            if (c == Color.Transparent) return;
+            lastHi = c;
+            hiBtn.Image = MakeSwatch(c);
+            HiBtn_Click(sender, e);
+        }
+
+        void BgPick_Click(object sender, EventArgs e)
+        {
+            Color c = PickColor(((ToolStripItem)sender).Tag, ed.BackColor);
+            if (c == Color.Transparent) return;
+            SetPageBg(c);
+            ed.Focus();
+        }
+    }
+
+    // ================= 찾기 / 바꾸기 창 =================
+
+    public class FindForm : Form
+    {
+        RichTextBox ed;
+        TextBox findBox, replBox;
+        CheckBox caseChk;
+        Label replLabel, msgLabel;
+        Button btnNext, btnPrev, btnRepl, btnAll, btnClose;
+        float S;
+
+        public string FindText { get { return findBox.Text; } }
+
+        int Px(int v) { return (int)(v * S); }
+
+        public FindForm(Form owner, RichTextBox editor, float scale)
+        {
+            ed = editor;
+            S = scale;
+            Owner = owner;
+            Text = "찾기";
+            Font = new Font("Malgun Gothic", 9f);
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(Px(420), Px(150));
+
+            Label l1 = new Label();
+            l1.Text = "찾을 내용";
+            l1.SetBounds(Px(10), Px(14), Px(70), Px(20));
+            findBox = new TextBox();
+            findBox.SetBounds(Px(80), Px(10), Px(220), Px(24));
+
+            replLabel = new Label();
+            replLabel.Text = "바꿀 내용";
+            replLabel.SetBounds(Px(10), Px(46), Px(70), Px(20));
+            replBox = new TextBox();
+            replBox.SetBounds(Px(80), Px(42), Px(220), Px(24));
+
+            caseChk = new CheckBox();
+            caseChk.Text = "대/소문자 구분";
+            caseChk.SetBounds(Px(80), Px(74), Px(200), Px(22));
+
+            msgLabel = new Label();
+            msgLabel.ForeColor = Color.FromArgb(224, 62, 62);
+            msgLabel.SetBounds(Px(10), Px(118), Px(290), Px(20));
+
+            btnNext = MakeButton("다음 찾기", 8);
+            btnPrev = MakeButton("이전 찾기", 38);
+            btnRepl = MakeButton("바꾸기", 68);
+            btnAll = MakeButton("모두 바꾸기", 98);
+            btnClose = MakeButton("닫기", 128);
+            btnClose.Visible = false;
+
+            btnNext.Click += new EventHandler(Next_Click);
+            btnPrev.Click += new EventHandler(Prev_Click);
+            btnRepl.Click += new EventHandler(Repl_Click);
+            btnAll.Click += new EventHandler(All_Click);
+            btnClose.Click += new EventHandler(Close_Click);
+
+            Controls.Add(l1); Controls.Add(findBox);
+            Controls.Add(replLabel); Controls.Add(replBox);
+            Controls.Add(caseChk); Controls.Add(msgLabel);
+            AcceptButton = btnNext;
+            CancelButton = btnClose;
+        }
+
+        Button MakeButton(string text, int y)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.SetBounds(Px(310), Px(y), Px(100), Px(26));
+            Controls.Add(b);
+            return b;
+        }
+
+        public void SetFindText(string s) { findBox.Text = s; }
+
+        public void Open(bool replace)
+        {
+            Text = replace ? "바꾸기" : "찾기";
+            replLabel.Visible = replace;
+            replBox.Visible = replace;
+            btnRepl.Visible = replace;
+            btnAll.Visible = replace;
+            msgLabel.Text = "";
+            if (!Visible)
+            {
+                Rectangle r = Owner.Bounds;
+                Location = new Point(r.Right - Width - Px(30), r.Top + Px(110));
+                Show();
+            }
+            Activate();
+            findBox.Focus();
+            findBox.SelectAll();
+        }
+
+        RichTextBoxFinds Opt()
+        {
+            return caseChk.Checked ? RichTextBoxFinds.MatchCase : RichTextBoxFinds.None;
+        }
+
+        public bool FindNext(bool forward)
+        {
+            string t = findBox.Text;
+            msgLabel.Text = "";
+            msgLabel.ForeColor = Color.FromArgb(224, 62, 62);
+            if (t.Length == 0) return false;
+            int idx;
+            if (forward)
+            {
+                int start = ed.SelectionStart + ed.SelectionLength;
+                idx = start < ed.TextLength ? ed.Find(t, start, Opt()) : -1;
+                if (idx < 0) idx = ed.Find(t, 0, Opt());
+            }
+            else
+            {
+                RichTextBoxFinds o = Opt() | RichTextBoxFinds.Reverse;
+                idx = ed.SelectionStart > 0 ? ed.Find(t, 0, ed.SelectionStart, o) : -1;
+                if (idx < 0) idx = ed.Find(t, 0, ed.TextLength, o);
+            }
+            if (idx < 0)
+            {
+                msgLabel.Text = "'" + t + "' 을(를) 찾을 수 없습니다.";
+                return false;
+            }
+            ed.ScrollToCaret();
+            return true;
+        }
+
+        void Next_Click(object sender, EventArgs e) { FindNext(true); }
+        void Prev_Click(object sender, EventArgs e) { FindNext(false); }
+
+        void Repl_Click(object sender, EventArgs e)
+        {
+            string t = findBox.Text;
+            if (t.Length == 0) return;
+            StringComparison sc = caseChk.Checked ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            if (ed.SelectionLength > 0 && string.Equals(ed.SelectedText, t, sc))
+                ed.SelectedText = replBox.Text;
+            FindNext(true);
+        }
+
+        void All_Click(object sender, EventArgs e)
+        {
+            string t = findBox.Text;
+            if (t.Length == 0) return;
+            string r = replBox.Text;
+            int count = 0;
+            int pos = 0;
+            while (pos < ed.TextLength)
+            {
+                int idx = ed.Find(t, pos, Opt());
+                if (idx < 0) break;
+                ed.SelectedText = r;
+                count++;
+                pos = idx + r.Length;
+            }
+            msgLabel.ForeColor = Color.FromArgb(15, 123, 108);
+            msgLabel.Text = count + "개를 바꿨습니다.";
+        }
+
+        void Close_Click(object sender, EventArgs e) { Hide(); if (Owner != null) Owner.Activate(); }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+                if (Owner != null) Owner.Activate();
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
+    }
+
+    // ================= 이름 입력 창 =================
+
+    public static class InputDialog
+    {
+        public static string Ask(Form owner, string title, string prompt, string value)
+        {
+            float s = 1f;
+            using (Graphics g = owner.CreateGraphics()) { s = g.DpiX / 96f; }
+            using (Form f = new Form())
+            {
+                f.Text = title;
+                f.Font = new Font("Malgun Gothic", 9f);
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterParent;
+                f.MinimizeBox = false;
+                f.MaximizeBox = false;
+                f.ShowInTaskbar = false;
+                f.ClientSize = new Size((int)(340 * s), (int)(120 * s));
+
+                Label l = new Label();
+                l.Text = prompt;
+                l.SetBounds((int)(12 * s), (int)(12 * s), (int)(310 * s), (int)(20 * s));
+                TextBox tb = new TextBox();
+                tb.Text = value;
+                tb.SetBounds((int)(12 * s), (int)(38 * s), (int)(316 * s), (int)(24 * s));
+                Button ok = new Button();
+                ok.Text = "확인";
+                ok.DialogResult = DialogResult.OK;
+                ok.SetBounds((int)(168 * s), (int)(78 * s), (int)(76 * s), (int)(28 * s));
+                Button cancel = new Button();
+                cancel.Text = "취소";
+                cancel.DialogResult = DialogResult.Cancel;
+                cancel.SetBounds((int)(252 * s), (int)(78 * s), (int)(76 * s), (int)(28 * s));
+
+                f.Controls.Add(l);
+                f.Controls.Add(tb);
+                f.Controls.Add(ok);
+                f.Controls.Add(cancel);
+                f.AcceptButton = ok;
+                f.CancelButton = cancel;
+                tb.SelectAll();
+
+                if (f.ShowDialog(owner) == DialogResult.OK) return tb.Text;
+                return null;
+            }
+        }
+    }
+}
