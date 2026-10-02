@@ -2592,13 +2592,30 @@ namespace AhnNote
 
     // ================= 이름 입력 창 =================
 
+    // 이름 입력창: 뜨자마자 입력칸에 커서가 들어가게 함
+    public class InputForm : Form
+    {
+        public TextBox Box;
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Activate();
+            if (Box != null)
+            {
+                Box.Focus();
+                Box.SelectAll();
+            }
+        }
+    }
+
     public static class InputDialog
     {
         public static string Ask(Form owner, string title, string prompt, string value)
         {
             float s = 1f;
             using (Graphics g = owner.CreateGraphics()) { s = g.DpiX / 96f; }
-            using (Form f = new Form())
+            using (InputForm f = new InputForm())
             {
                 f.Text = title;
                 f.Font = new Font("Malgun Gothic", 9f);
@@ -2630,6 +2647,8 @@ namespace AhnNote
                 f.Controls.Add(cancel);
                 f.AcceptButton = ok;
                 f.CancelButton = cancel;
+                f.Box = tb;
+                f.ActiveControl = tb;
                 tb.SelectAll();
                 Skin.Apply(f);
                 f.TopMost = owner.TopMost;   // 항상 위일 때 입력창이 뒤로 숨지 않게
