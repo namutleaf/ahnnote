@@ -8,6 +8,7 @@ using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace AhnNote
@@ -74,14 +75,22 @@ namespace AhnNote
         static readonly string[] RULE_FROM = { "<=>", "←>", "[ ]", "[]", "[x]", "[X]", "[v]", "()", "->", "<-", "=>" };
         static readonly string[] RULE_TO = { "⇔", "↔", BOX, BOX, BOX_ON, BOX_ON, BOX_ON, "○", "→", "←", "⇒" };
 
-        static readonly Color THEME = Color.FromArgb(119, 25, 170);
-        static readonly Color SIDE_BACK = Color.FromArgb(246, 241, 250);
-        static readonly Color SEL_BACK = Color.FromArgb(232, 218, 243);
-        static readonly Color LINE_COLOR = Color.FromArgb(220, 220, 220);
+        static readonly Color ACCENT = Color.FromArgb(0, 103, 192);
         static readonly Color[] NB_COLORS = {
-            Color.FromArgb(119, 25, 170), Color.FromArgb(11, 107, 203), Color.FromArgb(15, 123, 108),
+            Color.FromArgb(0, 103, 192), Color.FromArgb(11, 107, 203), Color.FromArgb(15, 123, 108),
             Color.FromArgb(217, 115, 13), Color.FromArgb(224, 62, 62), Color.FromArgb(105, 64, 165),
             Color.FromArgb(0, 137, 123), Color.FromArgb(194, 24, 91) };
+
+        // ---------- 테마 (라이트 / 다크) ----------
+        bool dark = false;
+        Color cAccent, cLogo, cWin, cSide, cList, cSel, cText, cMuted, cLine, cBar;
+        List<Panel> sidePanels = new List<Panel>();
+        List<Label> sideHeads = new List<Label>();
+        List<Button> sideAdds = new List<Button>();
+        Label logo;
+        Panel titleLine;
+        ToolStripButton darkBtn;
+        Dictionary<int, int> darkToLight = new Dictionary<int, int>();
 
         // ---------- Win32 ----------
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -92,6 +101,9 @@ namespace AhnNote
         const int EM_SETCHARFORMAT = 0x0444;
         const int SCF_SELECTION = 0x0001;
         const uint CFM_BACKCOLOR = 0x04000000;
+        const int EM_GETCHARFORMAT = 0x043A;
+        const uint CFM_COLOR = 0x40000000;
+        const uint CFE_AUTOCOLOR = 0x40000000;
 
         // ---------- 화면 ----------
         float S = 1f;
@@ -132,6 +144,11 @@ namespace AhnNote
         public MainForm()
         {
             using (Graphics g = CreateGraphics()) { S = g.DpiX / 96f; }
+            dataDir = Path.Combine(Application.StartupPath, DATA_FOLDER);
+            if (!CanWrite(dataDir))
+                dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AHNNOTE");
+            Directory.CreateDirectory(dataDir);
+            LoadSettings();
             baseFont = new Font(FONT_NAME, BASE_SIZE);
             Text = "AHNNOTE";
             Font = new Font(FONT_NAME, 9f);
@@ -149,27 +166,19 @@ namespace AhnNote
             split2.Dock = DockStyle.Fill;
             split2.FixedPanel = FixedPanel.Panel1;
             split2.SplitterWidth = Px(3);
-            split2.BackColor = LINE_COLOR;
-            split2.Panel1.BackColor = Color.White;
-            split2.Panel2.BackColor = Color.White;
-            split2.Panel1.Controls.Add(MakeSidePanel("페이지", pgList, "+ 페이지 추가", new EventHandler(NewPage_Click), Color.White));
+            split2.Panel1.Controls.Add(MakeSidePanel("페이지", pgList, "+ 페이지 추가", new EventHandler(NewPage_Click)));
             split2.Panel2.Controls.Add(pagePanel);
 
             split1 = new SplitContainer();
             split1.Dock = DockStyle.Fill;
             split1.FixedPanel = FixedPanel.Panel1;
             split1.SplitterWidth = Px(3);
-            split1.BackColor = LINE_COLOR;
-            split1.Panel1.BackColor = SIDE_BACK;
-            split1.Panel2.BackColor = Color.White;
-            Panel nbPanel = MakeSidePanel("노트북", nbList, "+ 노트북 추가", new EventHandler(NewNotebook_Click), SIDE_BACK);
-            Label logo = new Label();
+            Panel nbPanel = MakeSidePanel("노트북", nbList, "+ 노트북 추가", new EventHandler(NewNotebook_Click));
+            logo = new Label();
             logo.Text = "  AHNNOTE";
             logo.Dock = DockStyle.Top;
             logo.Height = Px(46);
             logo.TextAlign = ContentAlignment.MiddleLeft;
-            logo.BackColor = THEME;
-            logo.ForeColor = Color.White;
             logo.Font = new Font(FONT_NAME, 14f, FontStyle.Bold);
             nbPanel.Controls.Add(logo);
             split1.Panel1.Controls.Add(nbPanel);
@@ -178,6 +187,7 @@ namespace AhnNote
             Controls.Add(split1);
             Controls.Add(tool);
             Controls.Add(status);
+            ApplyTheme();
 
             saveTimer = new Timer();
             saveTimer.Interval = 3000;
@@ -214,15 +224,13 @@ namespace AhnNote
             titleBox.KeyDown += new KeyEventHandler(TitleBox_KeyDown);
             titleBox.Leave += new EventHandler(TitleBox_Leave);
 
-            Panel line = new Panel();
-            line.Dock = DockStyle.Top;
-            line.Height = 1;
-            line.BackColor = LINE_COLOR;
+            titleLine = new Panel();
+            titleLine.Dock = DockStyle.Top;
+            titleLine.Height = 1;
 
             dateLabel = new Label();
             dateLabel.Dock = DockStyle.Top;
             dateLabel.Height = Px(34);
-            dateLabel.ForeColor = Color.Gray;
             dateLabel.TextAlign = ContentAlignment.MiddleLeft;
 
             pagePanel = new Panel();
@@ -231,27 +239,26 @@ namespace AhnNote
             pagePanel.Padding = new Padding(Px(40), Px(20), Px(16), Px(6));
             pagePanel.Controls.Add(ed);
             pagePanel.Controls.Add(dateLabel);
-            pagePanel.Controls.Add(line);
+            pagePanel.Controls.Add(titleLine);
             pagePanel.Controls.Add(titleBox);
         }
 
         void BuildLists()
         {
-            nbList = MakeList(SIDE_BACK);
+            nbList = MakeList();
             nbList.SelectedIndexChanged += new EventHandler(NbList_SelectedIndexChanged);
             nbList.KeyDown += new KeyEventHandler(NbList_KeyDown);
 
-            pgList = MakeList(Color.White);
+            pgList = MakeList();
             pgList.SelectedIndexChanged += new EventHandler(PgList_SelectedIndexChanged);
             pgList.KeyDown += new KeyEventHandler(PgList_KeyDown);
         }
 
-        ListBox MakeList(Color back)
+        ListBox MakeList()
         {
             ListBox lb = new ListBox();
             lb.Dock = DockStyle.Fill;
             lb.BorderStyle = BorderStyle.None;
-            lb.BackColor = back;
             lb.DrawMode = DrawMode.OwnerDrawFixed;
             lb.ItemHeight = Px(32);
             lb.IntegralHeight = false;
@@ -261,18 +268,16 @@ namespace AhnNote
             return lb;
         }
 
-        Panel MakeSidePanel(string title, ListBox list, string btnText, EventHandler onAdd, Color back)
+        Panel MakeSidePanel(string title, ListBox list, string btnText, EventHandler onAdd)
         {
             Panel p = new Panel();
             p.Dock = DockStyle.Fill;
-            p.BackColor = back;
 
             Label head = new Label();
             head.Text = "  " + title;
             head.Dock = DockStyle.Top;
             head.Height = Px(32);
             head.TextAlign = ContentAlignment.MiddleLeft;
-            head.ForeColor = Color.DimGray;
             head.Font = new Font(FONT_NAME, 9f, FontStyle.Bold);
 
             Button add = new Button();
@@ -281,7 +286,6 @@ namespace AhnNote
             add.Height = Px(36);
             add.FlatStyle = FlatStyle.Flat;
             add.FlatAppearance.BorderSize = 0;
-            add.ForeColor = THEME;
             add.TextAlign = ContentAlignment.MiddleLeft;
             add.Padding = new Padding(Px(8), 0, 0, 0);
             add.Cursor = Cursors.Hand;
@@ -291,6 +295,9 @@ namespace AhnNote
             p.Controls.Add(list);
             p.Controls.Add(head);
             p.Controls.Add(add);
+            sidePanels.Add(p);
+            sideHeads.Add(head);
+            sideAdds.Add(add);
             return p;
         }
 
@@ -300,8 +307,6 @@ namespace AhnNote
             tool.GripStyle = ToolStripGripStyle.Hidden;
             tool.ImageScalingSize = new Size(Px(16), Px(16));
             tool.Padding = new Padding(Px(6), Px(3), Px(6), Px(3));
-            tool.BackColor = Color.White;
-            tool.RenderMode = ToolStripRenderMode.System;
             tool.Font = new Font(FONT_NAME, 9f);
 
             AddBtn("+ 노트북", "새 노트북 (Ctrl+Shift+N)", new EventHandler(NewNotebook_Click));
@@ -321,6 +326,7 @@ namespace AhnNote
             sizeBox = new ToolStripComboBox();
             sizeBox.AutoSize = false;
             sizeBox.Width = Px(52);
+            sizeBox.FlatStyle = FlatStyle.Flat;
             sizeBox.ToolTipText = "글자 크기 (Ctrl+Shift+> / <)";
             string[] sizes = { "8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "32", "36", "48", "72" };
             sizeBox.Items.AddRange(sizes);
@@ -339,7 +345,7 @@ namespace AhnNote
 
             Color[] fc = { Color.Black, Color.FromArgb(224, 62, 62), Color.FromArgb(217, 115, 13), Color.FromArgb(203, 145, 47),
                            Color.FromArgb(15, 123, 108), Color.FromArgb(11, 107, 203), Color.FromArgb(105, 64, 165), Color.FromArgb(155, 154, 151) };
-            string[] fn = { "검정", "빨강", "주황", "노랑", "초록", "파랑", "보라", "회색" };
+            string[] fn = { "기본", "빨강", "주황", "노랑", "초록", "파랑", "보라", "회색" };
             foreBtn = new ToolStripSplitButton("글자색");
             foreBtn.Image = MakeSwatch(lastFore);
             foreBtn.ToolTipText = "글자색";
@@ -375,6 +381,12 @@ namespace AhnNote
             AddBtn("• 목록", "글머리 기호 (Ctrl+.)  /  줄 처음에 - 입력 후 스페이스", new EventHandler(Bullet_Click));
             tool.Items.Add(new ToolStripSeparator());
             AddBtn("찾기", "찾기 (Ctrl+F) / 바꾸기 (Ctrl+H)", new EventHandler(Find_Click));
+
+            darkBtn = new ToolStripButton("\u25D0 다크 모드");
+            darkBtn.ToolTipText = "다크 모드 켜기/끄기 (Ctrl+Shift+D)";
+            darkBtn.Alignment = ToolStripItemAlignment.Right;
+            darkBtn.Click += new EventHandler(Dark_Click);
+            tool.Items.Add(darkBtn);
         }
 
         ToolStripButton AddBtn(string text, string tip, EventHandler h)
@@ -432,7 +444,7 @@ namespace AhnNote
                 Bitmap b = new Bitmap(32, 32);
                 using (Graphics g = Graphics.FromImage(b))
                 {
-                    g.Clear(THEME);
+                    g.Clear(ACCENT);
                     using (Font f = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Pixel))
                     {
                         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -449,7 +461,6 @@ namespace AhnNote
             status = new StatusStrip();
             status.SizingGrip = false;
             status.Font = new Font(FONT_NAME, 9f);
-            status.BackColor = Color.FromArgb(250, 250, 250);
             stLeft = new ToolStripStatusLabel();
             stLeft.Spring = true;
             stLeft.TextAlign = ContentAlignment.MiddleLeft;
@@ -498,11 +509,6 @@ namespace AhnNote
             base.OnLoad(e);
             try { split1.SplitterDistance = Px(190); } catch { }
             try { split2.SplitterDistance = Px(230); } catch { }
-
-            dataDir = Path.Combine(Application.StartupPath, DATA_FOLDER);
-            if (!CanWrite(dataDir))
-                dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AHNNOTE");
-            Directory.CreateDirectory(dataDir);
 
             LoadNotebooks();
             bool first = nbOrder.Count == 0;
@@ -582,6 +588,7 @@ namespace AhnNote
                 case Keys.Control | Keys.F: ShowFind(false); return true;
                 case Keys.Control | Keys.H: ShowFind(true); return true;
                 case Keys.F3: FindAgain(true); return true;
+                case Keys.Control | Keys.Shift | Keys.D: ToggleDark(); return true;
                 case Keys.Shift | Keys.F3: FindAgain(false); return true;
             }
 
@@ -595,6 +602,8 @@ namespace AhnNote
                     case Keys.Control | Keys.OemMinus: ToggleStyle(FontStyle.Strikeout); return true;
                     case Keys.Control | Keys.A: ed.SelectAll(); return true;
                     case Keys.Control | Keys.Shift | Keys.V: PastePlain(); return true;
+                    case Keys.Control | Keys.V: PasteRich(); return true;
+                    case Keys.Shift | Keys.Insert: PasteRich(); return true;
                     case Keys.Control | Keys.Y: ed.Redo(); return true;
                     case Keys.Control | Keys.Shift | Keys.Z: ed.Redo(); return true;
                     case Keys.Control | Keys.D1: ToggleTodo(); return true;
@@ -803,7 +812,7 @@ namespace AhnNote
             ListBox lb = (ListBox)sender;
             if (e.Index < 0 || e.Index >= lb.Items.Count) return;
             bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            using (SolidBrush b = new SolidBrush(sel ? SEL_BACK : lb.BackColor))
+            using (SolidBrush b = new SolidBrush(sel ? cSel : lb.BackColor))
                 e.Graphics.FillRectangle(b, e.Bounds);
             int x = e.Bounds.X + Px(12);
             if (lb == nbList)
@@ -817,12 +826,12 @@ namespace AhnNote
             }
             if (sel)
             {
-                using (SolidBrush b = new SolidBrush(THEME))
+                using (SolidBrush b = new SolidBrush(cAccent))
                     e.Graphics.FillRectangle(b, e.Bounds.X, e.Bounds.Y, Px(4), e.Bounds.Height);
             }
             Rectangle r = new Rectangle(x, e.Bounds.Y, e.Bounds.Right - x - Px(4), e.Bounds.Height);
             Font f = sel ? new Font(lb.Font, FontStyle.Bold) : lb.Font;
-            TextRenderer.DrawText(e.Graphics, lb.Items[e.Index].ToString(), f, r, Color.FromArgb(40, 40, 40),
+            TextRenderer.DrawText(e.Graphics, lb.Items[e.Index].ToString(), f, r, cText,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             if (sel) f.Dispose();
         }
@@ -972,8 +981,14 @@ namespace AhnNote
             string path = PagePath(curNotebook, pg);
             try
             {
-                if (File.Exists(path)) ed.LoadFile(path, RichTextBoxStreamType.RichText);
-                else ed.Clear();
+                if (!File.Exists(path)) ed.Clear();
+                else if (!dark) ed.LoadFile(path, RichTextBoxStreamType.RichText);
+                else
+                {
+                    string rtf = File.ReadAllText(path, Latin1());
+                    if (!rtf.StartsWith("{\\rtf")) throw new Exception("not rtf");
+                    ed.Rtf = MapColorTable(rtf, true);
+                }
             }
             catch
             {
@@ -983,8 +998,9 @@ namespace AhnNote
             {
                 ed.SelectAll();
                 ed.SelectionFont = baseFont;
-                ed.SelectionColor = Color.Black;
+                ed.SelectionColor = Disp(Color.Black);
             }
+            else if (dark) FixTextColors(0, ed.TextLength, false, 0);
             ed.Select(0, 0);
             ed.ClearUndo();
 
@@ -1017,7 +1033,8 @@ namespace AhnNote
             string tmp = path + ".tmp";
             try
             {
-                ed.SaveFile(tmp, RichTextBoxStreamType.RichText);
+                if (!dark) ed.SaveFile(tmp, RichTextBoxStreamType.RichText);
+                else File.WriteAllText(tmp, MapColorTable(ed.Rtf, false), Latin1());
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(tmp, path);
                 dirty = false;
@@ -1178,13 +1195,14 @@ namespace AhnNote
             moveToMenu.Enabled = moveToMenu.DropDownItems.Count > 0;
         }
 
-        void ApplyBgColor(Color c)
+        void ApplyBgColor(Color light)
         {
+            Color c = Disp(light);
             ed.BackColor = c;
             pagePanel.BackColor = c;
             titleBox.BackColor = c;
             dateLabel.BackColor = c;
-            bgBtn.Image = MakeSwatch(c);
+            bgBtn.Image = MakeSwatch(light);
         }
 
         void SetPageBg(Color c)
@@ -1194,6 +1212,264 @@ namespace AhnNote
             if (c.ToArgb() == Color.White.ToArgb()) pgBg.Remove(curPage);
             else pgBg[curPage] = c.ToArgb().ToString();
             SavePgMeta();
+        }
+
+        // ================= 테마 / 다크 모드 =================
+
+        void LoadSettings()
+        {
+            try
+            {
+                string f = Path.Combine(dataDir, "_settings.txt");
+                if (!File.Exists(f)) return;
+                foreach (string line in File.ReadAllLines(f, Encoding.UTF8))
+                    if (line.Trim() == "dark=1") dark = true;
+            }
+            catch { }
+        }
+
+        void SaveSettings()
+        {
+            try { File.WriteAllText(Path.Combine(dataDir, "_settings.txt"), dark ? "dark=1\r\n" : "dark=0\r\n", Encoding.UTF8); }
+            catch { }
+        }
+
+        void SetPalette()
+        {
+            if (!dark)
+            {
+                cAccent = Color.FromArgb(0, 103, 192);
+                cLogo = Color.FromArgb(0, 103, 192);
+                cWin = Color.White;
+                cSide = Color.FromArgb(243, 247, 252);
+                cList = Color.White;
+                cSel = Color.FromArgb(217, 233, 250);
+                cText = Color.FromArgb(32, 32, 32);
+                cMuted = Color.FromArgb(110, 115, 122);
+                cLine = Color.FromArgb(222, 226, 232);
+                cBar = Color.White;
+            }
+            else
+            {
+                cAccent = Color.FromArgb(96, 180, 255);
+                cLogo = Color.FromArgb(0, 84, 158);
+                cWin = Color.FromArgb(32, 32, 32);
+                cSide = Color.FromArgb(27, 27, 29);
+                cList = Color.FromArgb(36, 36, 38);
+                cSel = Color.FromArgb(38, 60, 88);
+                cText = Color.FromArgb(232, 232, 232);
+                cMuted = Color.FromArgb(150, 154, 160);
+                cLine = Color.FromArgb(55, 55, 58);
+                cBar = Color.FromArgb(43, 43, 45);
+            }
+        }
+
+        void ApplyTheme()
+        {
+            SetPalette();
+            BackColor = cWin;
+            split1.BackColor = cLine;
+            split2.BackColor = cLine;
+            split1.Panel1.BackColor = cSide;
+            split1.Panel2.BackColor = cList;
+            split2.Panel1.BackColor = cList;
+            split2.Panel2.BackColor = cWin;
+            nbList.BackColor = cSide;
+            pgList.BackColor = cList;
+            sidePanels[0].BackColor = cList;   // 페이지
+            sidePanels[1].BackColor = cSide;   // 노트북
+            foreach (Label h in sideHeads) h.ForeColor = cMuted;
+            foreach (Button b in sideAdds)
+            {
+                b.ForeColor = cAccent;
+                b.FlatAppearance.MouseOverBackColor = cSel;
+                b.FlatAppearance.MouseDownBackColor = cSel;
+            }
+            logo.BackColor = cLogo;
+            logo.ForeColor = Color.White;
+            titleLine.BackColor = cLine;
+            titleBox.ForeColor = cText;
+            dateLabel.ForeColor = cMuted;
+
+            ToolStripManager.Renderer = new AhnRenderer(new AhnColors(dark), cText);
+            tool.BackColor = cBar;
+            status.BackColor = cBar;
+            stLeft.ForeColor = cText;
+            stRight.ForeColor = cText;
+            sizeBox.ComboBox.BackColor = dark ? cList : Color.White;
+            sizeBox.ComboBox.ForeColor = cText;
+            darkBtn.Checked = dark;
+            darkBtn.Text = dark ? "\u25D1 라이트 모드" : "\u25D0 다크 모드";
+
+            Skin.SetDark(dark);
+            Skin.TitleBar(this, dark);
+            Skin.ScrollBars(ed, dark);
+            Skin.ScrollBars(nbList, dark);
+            Skin.ScrollBars(pgList, dark);
+            if (findForm != null) Skin.Apply(findForm);
+            nbList.Invalidate();
+            pgList.Invalidate();
+            Invalidate(true);
+        }
+
+        void ToggleDark()
+        {
+            CommitTitle();
+            SaveCurrent();          // 지금 모드 기준으로 먼저 저장
+            dark = !dark;
+            SaveSettings();
+            ApplyTheme();
+            if (curPage != null) OpenPage(curPage);
+            ed.Focus();
+        }
+
+        void Dark_Click(object sender, EventArgs e) { ToggleDark(); }
+
+        static Encoding Latin1() { return Encoding.GetEncoding(28591); }
+
+        // 화면에 보여줄 색 (다크 모드면 밝기를 뒤집음). 저장은 항상 라이트 기준 색.
+        Color Disp(Color c)
+        {
+            if (!dark || c.IsEmpty) return c;
+            Color d = ToDarkColor(c);
+            darkToLight[d.ToArgb()] = c.ToArgb();
+            return d;
+        }
+
+        Color ToLight(Color d)
+        {
+            int v;
+            if (darkToLight.TryGetValue(d.ToArgb(), out v)) return Color.FromArgb(v);
+            if (d.GetBrightness() < 0.10f) return d;   // 붙여넣은 아주 어두운 색은 그대로
+            float l = 1f - (d.GetBrightness() - 0.10f) / 0.80f;
+            return FromHsl(d.GetHue(), d.GetSaturation(), l);
+        }
+
+        static Color ToDarkColor(Color c)
+        {
+            float l = 0.10f + 0.80f * (1f - c.GetBrightness());
+            return FromHsl(c.GetHue(), c.GetSaturation(), l);
+        }
+
+        static Color FromHsl(float h, float s, float l)
+        {
+            if (l < 0f) l = 0f;
+            if (l > 1f) l = 1f;
+            if (s <= 0.001f)
+            {
+                int v = ToByte(l);
+                return Color.FromArgb(v, v, v);
+            }
+            float q = l < 0.5f ? l * (1f + s) : l + s - l * s;
+            float p = 2f * l - q;
+            float hk = h / 360f;
+            return Color.FromArgb(ToByte(HueToRgb(p, q, hk + 1f / 3f)), ToByte(HueToRgb(p, q, hk)), ToByte(HueToRgb(p, q, hk - 1f / 3f)));
+        }
+
+        static float HueToRgb(float p, float q, float t)
+        {
+            if (t < 0f) t += 1f;
+            if (t > 1f) t -= 1f;
+            if (t < 1f / 6f) return p + (q - p) * 6f * t;
+            if (t < 0.5f) return q;
+            if (t < 2f / 3f) return p + (q - p) * (2f / 3f - t) * 6f;
+            return p;
+        }
+
+        static int ToByte(float v)
+        {
+            int i = (int)Math.Round(v * 255f);
+            if (i < 0) i = 0;
+            if (i > 255) i = 255;
+            return i;
+        }
+
+        static readonly Regex COLOR_RE = new Regex(@"\\red(\d+)\\green(\d+)\\blue(\d+)");
+
+        // RTF 색상표의 색을 다크용 / 라이트용으로 바꿈
+        string MapColorTable(string rtf, bool toDark)
+        {
+            int i = rtf.IndexOf("{\\colortbl");
+            if (i < 0) return rtf;
+            int j = rtf.IndexOf('}', i);
+            if (j < 0) return rtf;
+            string tbl = rtf.Substring(i, j - i);
+            StringBuilder sb = new StringBuilder();
+            int pos = 0;
+            foreach (Match m in COLOR_RE.Matches(tbl))
+            {
+                sb.Append(tbl, pos, m.Index - pos);
+                Color c = Color.FromArgb(Math.Min(255, int.Parse(m.Groups[1].Value)),
+                    Math.Min(255, int.Parse(m.Groups[2].Value)), Math.Min(255, int.Parse(m.Groups[3].Value)));
+                Color n = toDark ? Disp(c) : ToLight(c);
+                sb.Append("\\red").Append(n.R).Append("\\green").Append(n.G).Append("\\blue").Append(n.B);
+                pos = m.Index + m.Length;
+            }
+            sb.Append(tbl.Substring(pos));
+            return rtf.Substring(0, i) + sb.ToString() + rtf.Substring(j);
+        }
+
+        // 다크 모드: 색 지정이 없는(자동) 글자를 밝은 기본색으로.
+        // fixDark 이면 붙여넣은 어두운 글자색도 다크용으로 바꿈.
+        void FixTextColors(int start, int end, bool fixDark, int caret)
+        {
+            Color text = Disp(Color.Black);
+            uiBusy = true;
+            SetRedraw(false);
+            try
+            {
+                int i = start;
+                while (i < end)
+                {
+                    int n = end - i;
+                    ed.Select(i, n);
+                    CHARFORMAT2 cf = GetCharFormat();
+                    while (n > 1 && (cf.dwMask & CFM_COLOR) == 0)
+                    {
+                        n = n / 2;
+                        ed.Select(i, n);
+                        cf = GetCharFormat();
+                    }
+                    if ((cf.dwMask & CFM_COLOR) != 0)
+                    {
+                        if ((cf.dwEffects & CFE_AUTOCOLOR) != 0) ed.SelectionColor = text;
+                        else if (fixDark && ed.SelectionColor.GetBrightness() < 0.35f) ed.SelectionColor = Disp(ed.SelectionColor);
+                    }
+                    i += n;
+                }
+            }
+            catch
+            {
+                // Win32 호출이 안 되는 환경용 (느리지만 안전)
+                for (int k = start; k < end; k++)
+                {
+                    ed.Select(k, 1);
+                    if (ed.SelectionColor.GetBrightness() < 0.35f) ed.SelectionColor = Disp(ed.SelectionColor);
+                }
+            }
+            ed.Select(caret, 0);
+            if (ed.TextLength == 0) ed.SelectionColor = text;
+            SetRedraw(true);
+            uiBusy = false;
+        }
+
+        // 붙여넣기 (다크 모드면 글자색 맞춤)
+        void PasteRich()
+        {
+            int s0 = ed.SelectionStart;
+            ed.Paste();
+            if (!dark) return;
+            int s1 = ed.SelectionStart;
+            if (s1 > s0) FixTextColors(s0, s1, true, s1);
+        }
+
+        CHARFORMAT2 GetCharFormat()
+        {
+            CHARFORMAT2 cf = new CHARFORMAT2();
+            cf.cbSize = Marshal.SizeOf(typeof(CHARFORMAT2));
+            cf.szFaceName = "";
+            SendCharFormat(ed.Handle, EM_GETCHARFORMAT, (IntPtr)SCF_SELECTION, ref cf);
+            return cf;
         }
 
         // ================= 편집기 =================
@@ -1584,7 +1860,11 @@ namespace AhnNote
 
         void ShowFind(bool replace)
         {
-            if (findForm == null) findForm = new FindForm(this, ed, S);
+            if (findForm == null)
+            {
+                findForm = new FindForm(this, ed, S);
+                Skin.Apply(findForm);
+            }
             string sel = ed.SelectedText;
             if (sel.Length > 0 && sel.IndexOf('\n') < 0 && sel.Length < 100) findForm.SetFindText(sel);
             findForm.Open(replace);
@@ -1602,9 +1882,9 @@ namespace AhnNote
         {
             ed.Select(ed.TextLength, 0);
             ed.SelectionFont = new Font(FONT_NAME, size, st);
-            ed.SelectionColor = fore;
+            ed.SelectionColor = Disp(fore);
             if (hi.IsEmpty) ClearHighlight();
-            else ed.SelectionBackColor = hi;
+            else ed.SelectionBackColor = Disp(hi);
             ed.SelectedText = text;
         }
 
@@ -1633,7 +1913,7 @@ namespace AhnNote
             AddLine("Ctrl+A 모두 선택,  Ctrl+C 복사,  Ctrl+X 잘라내기,  Ctrl+V 붙여넣기,  Ctrl+Shift+V 텍스트만 붙여넣기");
             AddLine("Ctrl+Z 실행 취소,  Ctrl+Y 다시 실행,  Ctrl+S 저장");
             AddLine("Ctrl+N 새 페이지,  Ctrl+Shift+N 새 노트북,  F2 이름 바꾸기,  Alt+↑↓ 순서 바꾸기");
-            AddLine("Ctrl+마우스 휠 확대/축소,  Ctrl+0 원래 크기");
+            AddLine("Ctrl+마우스 휠 확대/축소,  Ctrl+0 원래 크기,  Ctrl+Shift+D 다크 모드");
             AddLine("");
             AddText("자동 변환 (입력하면 바로 바뀝니다)\n", 16f, FontStyle.Bold, Color.Black, none);
             AddLine("[]  →  체크박스,   [x]  →  체크됨,   ()  →  ○");
@@ -1677,7 +1957,7 @@ namespace AhnNote
         void Find_Click(object sender, EventArgs e) { ShowFind(false); }
         void Cut_Click(object sender, EventArgs e) { ed.Cut(); }
         void Copy_Click(object sender, EventArgs e) { ed.Copy(); }
-        void Paste_Click(object sender, EventArgs e) { ed.Paste(); }
+        void Paste_Click(object sender, EventArgs e) { PasteRich(); }
         void PastePlain_Click(object sender, EventArgs e) { PastePlain(); }
         void SelectAll_Click(object sender, EventArgs e) { ed.SelectAll(); }
 
@@ -1710,15 +1990,15 @@ namespace AhnNote
             using (ColorDialog cd = new ColorDialog())
             {
                 cd.FullOpen = true;
-                cd.Color = current;
-                if (cd.ShowDialog(this) == DialogResult.OK) return cd.Color;
+                cd.Color = Disp(current);
+                if (cd.ShowDialog(this) == DialogResult.OK) return dark ? ToLight(cd.Color) : cd.Color;
             }
             return Color.Transparent;
         }
 
         void ForeBtn_Click(object sender, EventArgs e)
         {
-            ed.SelectionColor = lastFore;
+            ed.SelectionColor = Disp(lastFore);
             MarkDirty();
             ed.Focus();
         }
@@ -1734,7 +2014,7 @@ namespace AhnNote
 
         void HiBtn_Click(object sender, EventArgs e)
         {
-            ed.SelectionBackColor = lastHi;
+            ed.SelectionBackColor = Disp(lastHi);
             MarkDirty();
             ed.Focus();
         }
@@ -1761,6 +2041,191 @@ namespace AhnNote
             if (c == Color.Transparent) return;
             SetPageBg(c);
             ed.Focus();
+        }
+    }
+
+    // ================= 다크 모드 그리기 =================
+
+    public static class Skin
+    {
+        public static bool Dark = false;
+        public static Color Back = SystemColors.Control;
+        public static Color Fore = SystemColors.ControlText;
+        public static Color Field = SystemColors.Window;
+        public static Color Line = SystemColors.ControlDark;
+
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        static extern int SetWindowTheme(IntPtr h, string app, string id);
+
+        public static void SetDark(bool dark)
+        {
+            Dark = dark;
+            if (dark)
+            {
+                Back = Color.FromArgb(43, 43, 45);
+                Fore = Color.FromArgb(232, 232, 232);
+                Field = Color.FromArgb(32, 32, 32);
+                Line = Color.FromArgb(80, 80, 84);
+            }
+            else
+            {
+                Back = SystemColors.Control;
+                Fore = SystemColors.ControlText;
+                Field = SystemColors.Window;
+                Line = SystemColors.ControlDark;
+            }
+        }
+
+        public static void TitleBar(Form f, bool dark)
+        {
+            try
+            {
+                int v = dark ? 1 : 0;
+                DwmSetWindowAttribute(f.Handle, 20, ref v, 4);
+            }
+            catch { }
+        }
+
+        public static void ScrollBars(Control c, bool dark)
+        {
+            try { SetWindowTheme(c.Handle, dark ? "DarkMode_Explorer" : "Explorer", null); }
+            catch { }
+        }
+
+        // 대화 상자 색 맞추기
+        public static void Apply(Control root)
+        {
+            if (root is Form)
+            {
+                root.BackColor = Back;
+                root.ForeColor = Fore;
+                TitleBar((Form)root, Dark);
+            }
+            foreach (Control c in root.Controls)
+            {
+                if (c is TextBox)
+                {
+                    c.BackColor = Field;
+                    c.ForeColor = Fore;
+                }
+                else if (c is Button)
+                {
+                    Button b = (Button)c;
+                    if (Dark)
+                    {
+                        b.FlatStyle = FlatStyle.Flat;
+                        b.FlatAppearance.BorderColor = Line;
+                        b.BackColor = Field;
+                        b.ForeColor = Fore;
+                    }
+                    else
+                    {
+                        b.FlatStyle = FlatStyle.Standard;
+                        b.BackColor = SystemColors.Control;
+                        b.ForeColor = SystemColors.ControlText;
+                        b.UseVisualStyleBackColor = true;
+                    }
+                }
+                else if (c is Label || c is CheckBox)
+                {
+                    if (c.ForeColor == SystemColors.ControlText || c.ForeColor == Color.FromArgb(232, 232, 232)) c.ForeColor = Fore;
+                }
+                if (c.Controls.Count > 0) Apply(c);
+            }
+        }
+    }
+
+    // 도구 모음 / 메뉴 색
+    public class AhnColors : ProfessionalColorTable
+    {
+        Color bar, menu, hover, press, check, border, sep;
+
+        public AhnColors(bool dark)
+        {
+            UseSystemColors = false;
+            if (dark)
+            {
+                bar = Color.FromArgb(43, 43, 45);
+                menu = Color.FromArgb(43, 43, 45);
+                hover = Color.FromArgb(62, 62, 66);
+                press = Color.FromArgb(52, 78, 110);
+                check = Color.FromArgb(38, 72, 110);
+                border = Color.FromArgb(70, 70, 74);
+                sep = Color.FromArgb(70, 70, 74);
+            }
+            else
+            {
+                bar = Color.White;
+                menu = Color.White;
+                hover = Color.FromArgb(229, 240, 251);
+                press = Color.FromArgb(204, 224, 247);
+                check = Color.FromArgb(204, 224, 247);
+                border = Color.FromArgb(200, 206, 214);
+                sep = Color.FromArgb(214, 218, 224);
+            }
+        }
+
+        public override Color ToolStripGradientBegin { get { return bar; } }
+        public override Color ToolStripGradientMiddle { get { return bar; } }
+        public override Color ToolStripGradientEnd { get { return bar; } }
+        public override Color ToolStripBorder { get { return bar; } }
+        public override Color ToolStripDropDownBackground { get { return menu; } }
+        public override Color ImageMarginGradientBegin { get { return menu; } }
+        public override Color ImageMarginGradientMiddle { get { return menu; } }
+        public override Color ImageMarginGradientEnd { get { return menu; } }
+        public override Color MenuBorder { get { return border; } }
+        public override Color MenuItemBorder { get { return hover; } }
+        public override Color MenuItemSelected { get { return hover; } }
+        public override Color MenuItemSelectedGradientBegin { get { return hover; } }
+        public override Color MenuItemSelectedGradientEnd { get { return hover; } }
+        public override Color MenuItemPressedGradientBegin { get { return press; } }
+        public override Color MenuItemPressedGradientMiddle { get { return press; } }
+        public override Color MenuItemPressedGradientEnd { get { return press; } }
+        public override Color ButtonSelectedHighlight { get { return hover; } }
+        public override Color ButtonSelectedBorder { get { return hover; } }
+        public override Color ButtonSelectedGradientBegin { get { return hover; } }
+        public override Color ButtonSelectedGradientMiddle { get { return hover; } }
+        public override Color ButtonSelectedGradientEnd { get { return hover; } }
+        public override Color ButtonPressedHighlight { get { return press; } }
+        public override Color ButtonPressedBorder { get { return press; } }
+        public override Color ButtonPressedGradientBegin { get { return press; } }
+        public override Color ButtonPressedGradientMiddle { get { return press; } }
+        public override Color ButtonPressedGradientEnd { get { return press; } }
+        public override Color ButtonCheckedHighlight { get { return check; } }
+        public override Color ButtonCheckedGradientBegin { get { return check; } }
+        public override Color ButtonCheckedGradientMiddle { get { return check; } }
+        public override Color ButtonCheckedGradientEnd { get { return check; } }
+        public override Color CheckBackground { get { return check; } }
+        public override Color CheckSelectedBackground { get { return press; } }
+        public override Color CheckPressedBackground { get { return press; } }
+        public override Color SeparatorDark { get { return sep; } }
+        public override Color SeparatorLight { get { return bar; } }
+        public override Color StatusStripGradientBegin { get { return bar; } }
+        public override Color StatusStripGradientEnd { get { return bar; } }
+    }
+
+    public class AhnRenderer : ToolStripProfessionalRenderer
+    {
+        Color text;
+
+        public AhnRenderer(ProfessionalColorTable t, Color textColor) : base(t)
+        {
+            text = textColor;
+            RoundedEdges = false;
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? text : Color.Gray;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+        {
+            e.ArrowColor = text;
+            base.OnRenderArrow(e);
         }
     }
 
@@ -1983,6 +2448,7 @@ namespace AhnNote
                 f.AcceptButton = ok;
                 f.CancelButton = cancel;
                 tb.SelectAll();
+                Skin.Apply(f);
 
                 if (f.ShowDialog(owner) == DialogResult.OK) return tb.Text;
                 return null;
