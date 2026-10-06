@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -102,6 +103,10 @@ namespace AhnNote
         Dictionary<string, string> nbColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         Timer holdTimer;
         MoleGame mole;
+        CalData cal;
+        CalendarForm calForm;
+        Timer alarmTimer;
+        Button calBtn;
         Dictionary<int, int> darkToLight = new Dictionary<int, int>();
 
         // ---------- Win32 ----------
@@ -161,6 +166,8 @@ namespace AhnNote
                 dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AHNNOTE");
             Directory.CreateDirectory(dataDir);
             LoadSettings();
+            cal = new CalData(dataDir);
+            cal.Load();
             baseFont = new Font(FONT_NAME, BASE_SIZE);
             Text = "AHNNOTE";
             Font = new Font(FONT_NAME, 9f);
@@ -199,6 +206,18 @@ namespace AhnNote
             holdTimer = new Timer();
             holdTimer.Interval = 5000;
             holdTimer.Tick += new EventHandler(HoldTimer_Tick);
+            calBtn = new Button();
+            calBtn.Text = "  ▦  캘린더";
+            calBtn.Dock = DockStyle.Top;
+            calBtn.Height = Px(40);
+            calBtn.FlatStyle = FlatStyle.Flat;
+            calBtn.FlatAppearance.BorderSize = 0;
+            calBtn.TextAlign = ContentAlignment.MiddleLeft;
+            calBtn.Font = new Font(FONT_NAME, 10f, FontStyle.Bold);
+            calBtn.Cursor = Cursors.Hand;
+            calBtn.TabStop = false;
+            calBtn.Click += new EventHandler(CalBtn_Click);
+            nbPanel.Controls.Add(calBtn);
             nbPanel.Controls.Add(logo);
             split1.Panel1.Controls.Add(nbPanel);
             split1.Panel2.Controls.Add(split2);
@@ -566,6 +585,13 @@ namespace AhnNote
                 SaveCurrent();
             }
             ed.Focus();
+
+            UpdateCalButton();
+            alarmTimer = new Timer();
+            alarmTimer.Interval = 15000;
+            alarmTimer.Tick += new EventHandler(AlarmTimer_Tick);
+            alarmTimer.Start();
+            CheckAlarms(true);
         }
 
         bool CanWrite(string dir)
@@ -1328,6 +1354,10 @@ namespace AhnNote
             }
             logo.BackColor = cLogo;
             logo.ForeColor = Color.White;
+            calBtn.BackColor = cSide;
+            calBtn.ForeColor = cAccent;
+            calBtn.FlatAppearance.MouseOverBackColor = cSel;
+            calBtn.FlatAppearance.MouseDownBackColor = cSel;
             titleLine.BackColor = cLine;
             titleBox.ForeColor = cText;
             dateLabel.ForeColor = cMuted;
@@ -1350,6 +1380,7 @@ namespace AhnNote
             Skin.ScrollBars(nbList, dark);
             Skin.ScrollBars(pgList, dark);
             if (findForm != null) Skin.Apply(findForm);
+            if (calForm != null && !calForm.IsDisposed) calForm.ApplyColors();
             nbList.Invalidate();
             pgList.Invalidate();
             Invalidate(true);
@@ -1557,6 +1588,7 @@ namespace AhnNote
             topBtn.Checked = topMost;
             if (findForm != null) findForm.TopMost = topMost;
             if (mole != null && !mole.IsDisposed) mole.TopMost = topMost;
+            if (calForm != null && !calForm.IsDisposed) calForm.TopMost = topMost;
             SaveSettings();
             stLeft.Text = topMost ? "항상 위에 표시: 켜짐" : "항상 위에 표시: 꺼짐";
         }
@@ -1626,6 +1658,107 @@ namespace AhnNote
                 SaveSettings();
             }
             mole = null;
+        }
+
+        // ================= 캘린더 / 알림 =================
+
+        void CalBtn_Click(object sender, EventArgs e) { OpenCalendar(DateTime.Today, false); }
+
+        void OpenCalendar(DateTime day, bool jump)
+        {
+            if (calForm == null || calForm.IsDisposed)
+            {
+                calForm = new CalendarForm(cal, S);
+                calForm.Changed += new EventHandler(CalForm_Changed);
+                calForm.FormClosed += new FormClosedEventHandler(CalForm_Closed);
+                calForm.TopMost = TopMost;
+                calForm.StartPosition = FormStartPosition.Manual;
+                calForm.Location = new Point(Left + Math.Max(0, (Width - calForm.Width) / 2), Top + Math.Max(0, (Height - calForm.Height) / 2));
+                calForm.Show(this);
+                jump = true;
+            }
+            if (jump) calForm.GoTo(day);
+            if (calForm.WindowState == FormWindowState.Minimized) calForm.WindowState = FormWindowState.Normal;
+            calForm.Activate();
+        }
+
+        void CalForm_Changed(object sender, EventArgs e) { UpdateCalButton(); }
+
+        void CalForm_Closed(object sender, FormClosedEventArgs e) { calForm = null; }
+
+        void UpdateCalButton()
+        {
+            int n = cal.EventsOn(DateTime.Today).Count;
+            calBtn.Text = "  ▦  캘린더" + (n > 0 ? "      오늘 " + n + "개" : "");
+        }
+
+        void AlarmTimer_Tick(object sender, EventArgs e)
+        {
+            CheckAlarms(false);
+            UpdateCalButton();
+        }
+
+        // 알림 시각이 지난 것을 찾아 팝업. 시작할 때는 꺼져 있던 동안 놓친 알림을 모아서 보여줌.
+        void CheckAlarms(bool startup)
+        {
+            DateTime now = DateTime.Now;
+            List<string> missed = new List<string>();
+            bool changed = false;
+            foreach (CalEvent ev in cal.Events)
+            {
+                DateTime b = ev.Base();
+                foreach (int m in ev.Alarms)
+                {
+                    if (ev.Fired.IndexOf(m) >= 0) continue;
+                    DateTime t = b.AddMinutes(-m);
+                    if (t > now) continue;
+                    ev.Fired.Add(m);
+                    changed = true;
+                    if ((now - t).TotalMinutes <= 3 && !startup)
+                    {
+                        ShowAlarm(ev, m);
+                    }
+                    else if (b >= now.AddDays(-7))
+                    {
+                        missed.Add(ev.Date.ToString("M/d (ddd) ") + ev.TimeText() + "  " + ev.Title + "  (" + EventForm.AlarmText(m) + ")");
+                    }
+                }
+            }
+            if (changed) cal.Save();
+            if (missed.Count > 0)
+            {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < missed.Count && i < 7; i++)
+                {
+                    if (i > 0) sb.Append('\n');
+                    sb.Append(missed[i]);
+                }
+                if (missed.Count > 7) sb.Append("\n외 " + (missed.Count - 7) + "개");
+                string head = startup ? "놓친 알림 " + missed.Count + "개" : "지난 알림 " + missed.Count + "개";
+                string title = startup ? "꺼져 있는 동안 지난 알림" : "알림 시각이 지났습니다";
+                AlarmPopup p = new AlarmPopup(head, title, sb.ToString(), DateTime.Today, S);
+                p.OpenCalendar += new EventHandler(Popup_Open);
+                p.Show();
+            }
+        }
+
+        void ShowAlarm(CalEvent ev, int m)
+        {
+            string detail = ev.Date.ToString("M월 d일 (ddd)  ") + ev.TimeText();
+            if (ev.Body.Trim().Length > 0)
+            {
+                string first = ev.Body.Trim().Replace("\r\n", "\n").Split('\n')[0];
+                detail += "\n" + first;
+            }
+            AlarmPopup p = new AlarmPopup(EventForm.AlarmText(m) + " 알림", ev.Title, detail, ev.Date, S);
+            p.OpenCalendar += new EventHandler(Popup_Open);
+            p.Show();
+        }
+
+        void Popup_Open(object sender, EventArgs e)
+        {
+            AlarmPopup p = (AlarmPopup)sender;
+            OpenCalendar(p.Target, true);
         }
 
         // ================= 편집기 =================
@@ -3333,6 +3466,1375 @@ namespace AhnNote
             Say(g, (newBest ? "NEW BEST " : "BEST ") + Best, fSmall, newBest ? C_GOLD : Color.White, 75, 144, true);
             DrawSprite(g, MOLE_HIT, 57, 158, 3, true);
             if (now - stateAt > 800 && blink) Say(g, "CLICK TO RETRY", fSmall, Color.White, 75, 192, true);
+        }
+    }
+
+    // ================= 캘린더: 데이터 =================
+
+    public class CalEvent
+    {
+        public string Id;
+        public DateTime Date;          // 날짜만
+        public bool HasTime;
+        public int Minutes;            // 하루 중 시각 (분)
+        public int Color;              // 라벨 색 번호
+        public List<int> Alarms = new List<int>();   // 몇 분 전
+        public List<int> Fired = new List<int>();    // 이미 울린 알림
+        public string Title = "";
+        public string Body = "";
+
+        // 알림 기준 시각 (종일 일정은 오전 9시)
+        public DateTime Base()
+        {
+            return Date.AddMinutes(HasTime ? Minutes : 9 * 60);
+        }
+
+        public string TimeText()
+        {
+            if (!HasTime) return "종일";
+            return Date.AddMinutes(Minutes).ToString("tt h:mm");
+        }
+
+        public override string ToString() { return Title; }
+    }
+
+    public class CalData
+    {
+        public static readonly Color[] LABEL = {
+            Color.FromArgb(0, 103, 192), Color.FromArgb(0, 137, 123), Color.FromArgb(56, 142, 60), Color.FromArgb(217, 115, 13),
+            Color.FromArgb(224, 62, 62), Color.FromArgb(194, 24, 91), Color.FromArgb(105, 64, 165), Color.FromArgb(110, 110, 110) };
+        public static readonly string[] LABEL_NAME = { "파랑", "청록", "초록", "주황", "빨강", "분홍", "보라", "회색" };
+
+        public List<CalEvent> Events = new List<CalEvent>();
+        public Dictionary<DateTime, string> HolAdd = new Dictionary<DateTime, string>();
+        public Dictionary<DateTime, bool> HolDel = new Dictionary<DateTime, bool>();
+        Dictionary<int, Dictionary<DateTime, string>> holCache = new Dictionary<int, Dictionary<DateTime, string>>();
+        string dir;
+
+        public CalData(string dataDir) { dir = dataDir; }
+
+        string EventFile() { return Path.Combine(dir, "_calendar.txt"); }
+        string HolidayFile() { return Path.Combine(dir, "_holidays.txt"); }
+
+        static string Esc(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "");
+        }
+
+        static string Unesc(string s)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[i + 1];
+                    if (n == 'n') { sb.Append("\r\n"); i++; continue; }
+                    if (n == 't') { sb.Append('\t'); i++; continue; }
+                    if (n == '\\') { sb.Append('\\'); i++; continue; }
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        static string IntList(List<int> l)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (int v in l) { if (sb.Length > 0) sb.Append(','); sb.Append(v); }
+            return sb.ToString();
+        }
+
+        static List<int> ParseInts(string s)
+        {
+            List<int> l = new List<int>();
+            foreach (string p in s.Split(','))
+            {
+                int v;
+                if (int.TryParse(p, out v) && l.IndexOf(v) < 0) l.Add(v);
+            }
+            return l;
+        }
+
+        public void Load()
+        {
+            Events.Clear();
+            try
+            {
+                if (File.Exists(EventFile()))
+                {
+                    foreach (string line in File.ReadAllLines(EventFile(), Encoding.UTF8))
+                    {
+                        string[] f = line.Split('\t');
+                        if (f.Length < 8) continue;
+                        CalEvent ev = new CalEvent();
+                        ev.Id = f[0];
+                        DateTime d;
+                        if (!DateTime.TryParseExact(f[1], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
+                        ev.Date = d;
+                        if (f[2].Length == 5)
+                        {
+                            int h, m;
+                            if (int.TryParse(f[2].Substring(0, 2), out h) && int.TryParse(f[2].Substring(3, 2), out m))
+                            {
+                                ev.HasTime = true;
+                                ev.Minutes = h * 60 + m;
+                            }
+                        }
+                        int col;
+                        int.TryParse(f[3], out col);
+                        ev.Color = Math.Max(0, Math.Min(LABEL.Length - 1, col));
+                        ev.Alarms = ParseInts(f[4]);
+                        ev.Fired = ParseInts(f[5]);
+                        ev.Title = Unesc(f[6]);
+                        ev.Body = Unesc(f[7]);
+                        Events.Add(ev);
+                    }
+                }
+            }
+            catch { }
+            LoadHolidays();
+        }
+
+        public void Save()
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (CalEvent ev in Events)
+            {
+                sb.Append(ev.Id).Append('\t');
+                sb.Append(ev.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append('\t');
+                if (ev.HasTime) sb.Append((ev.Minutes / 60).ToString("00")).Append(':').Append((ev.Minutes % 60).ToString("00"));
+                sb.Append('\t').Append(ev.Color).Append('\t');
+                sb.Append(IntList(ev.Alarms)).Append('\t').Append(IntList(ev.Fired)).Append('\t');
+                sb.Append(Esc(ev.Title)).Append('\t').Append(Esc(ev.Body)).Append("\r\n");
+            }
+            WriteSafe(EventFile(), sb.ToString());
+        }
+
+        static void WriteSafe(string path, string text)
+        {
+            try
+            {
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, text, Encoding.UTF8);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+            }
+            catch { }
+        }
+
+        public List<CalEvent> EventsOn(DateTime day)
+        {
+            List<CalEvent> l = new List<CalEvent>();
+            foreach (CalEvent ev in Events) if (ev.Date == day.Date) l.Add(ev);
+            l.Sort(CompareEvents);
+            return l;
+        }
+
+        public static int CompareEvents(CalEvent a, CalEvent b)
+        {
+            int c = a.Date.CompareTo(b.Date);
+            if (c != 0) return c;
+            int ta = a.HasTime ? a.Minutes : -1;
+            int tb = b.HasTime ? b.Minutes : -1;
+            if (ta != tb) return ta.CompareTo(tb);
+            return string.Compare(a.Title, b.Title, StringComparison.CurrentCulture);
+        }
+
+        public List<CalEvent> Search(string q)
+        {
+            List<CalEvent> l = new List<CalEvent>();
+            foreach (CalEvent ev in Events)
+            {
+                if (ev.Title.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                    ev.Body.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) l.Add(ev);
+            }
+            l.Sort(CompareEvents);
+            return l;
+        }
+
+        // ---------- 공휴일 (직접 추가 / 삭제) ----------
+
+        void LoadHolidays()
+        {
+            HolAdd.Clear();
+            HolDel.Clear();
+            holCache.Clear();
+            try
+            {
+                if (!File.Exists(HolidayFile())) return;
+                foreach (string line in File.ReadAllLines(HolidayFile(), Encoding.UTF8))
+                {
+                    if (line.Length < 11) continue;
+                    DateTime d;
+                    if (!DateTime.TryParseExact(line.Substring(1, 10), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
+                    if (line[0] == '+')
+                    {
+                        string name = line.Length > 12 ? line.Substring(12) : "공휴일";
+                        HolAdd[d] = name;
+                    }
+                    else if (line[0] == '-') HolDel[d] = true;
+                }
+            }
+            catch { }
+        }
+
+        public void SaveHolidays()
+        {
+            holCache.Clear();
+            StringBuilder sb = new StringBuilder();
+            foreach (KeyValuePair<DateTime, bool> kv in HolDel)
+                sb.Append('-').Append(kv.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append("\r\n");
+            foreach (KeyValuePair<DateTime, string> kv in HolAdd)
+                sb.Append('+').Append(kv.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append('\t').Append(kv.Value.Replace("\t", " ")).Append("\r\n");
+            WriteSafe(HolidayFile(), sb.ToString());
+        }
+
+        // 그 해의 공휴일 (기본 + 직접 추가 - 삭제)
+        public Dictionary<DateTime, string> Holidays(int year)
+        {
+            Dictionary<DateTime, string> r;
+            if (holCache.TryGetValue(year, out r)) return r;
+            r = new Dictionary<DateTime, string>();
+            foreach (KeyValuePair<DateTime, string> kv in KHoliday.Builtin(year))
+            {
+                if (HolDel.ContainsKey(kv.Key)) continue;
+                string old;
+                if (r.TryGetValue(kv.Key, out old)) r[kv.Key] = old + ", " + kv.Value;
+                else r[kv.Key] = kv.Value;
+            }
+            foreach (KeyValuePair<DateTime, string> kv in HolAdd)
+            {
+                if (kv.Key.Year != year) continue;
+                string old;
+                if (r.TryGetValue(kv.Key, out old)) r[kv.Key] = old + ", " + kv.Value;
+                else r[kv.Key] = kv.Value;
+            }
+            holCache[year] = r;
+            return r;
+        }
+
+        public string HolidayName(DateTime d)
+        {
+            string n;
+            if (Holidays(d.Year).TryGetValue(d.Date, out n)) return n;
+            return null;
+        }
+    }
+
+    // ================= 한국 공휴일 (기본값) =================
+    // 음력 날짜는 윈도우 .NET 의 한국 음력 달력으로 계산 (2050년까지)
+    // 대체공휴일은 현재 규정대로 계산. 임시공휴일은 직접 추가.
+
+    public static class KHoliday
+    {
+        static KoreanLunisolarCalendar kcal = new KoreanLunisolarCalendar();
+        static Dictionary<int, List<KeyValuePair<DateTime, string>>> cache = new Dictionary<int, List<KeyValuePair<DateTime, string>>>();
+
+        static bool Lunar(int y, int m, int d, out DateTime r)
+        {
+            r = DateTime.MinValue;
+            try
+            {
+                int leap = kcal.GetLeapMonth(y);
+                int mm = (leap > 0 && m >= leap) ? m + 1 : m;
+                r = kcal.ToDateTime(y, mm, d, 0, 0, 0, 0);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        static void Add(List<KeyValuePair<DateTime, string>> l, DateTime d, string name)
+        {
+            l.Add(new KeyValuePair<DateTime, string>(d.Date, name));
+        }
+
+        static int CountOn(List<KeyValuePair<DateTime, string>> l, DateTime d)
+        {
+            int n = 0;
+            foreach (KeyValuePair<DateTime, string> kv in l) if (kv.Key == d.Date) n++;
+            return n;
+        }
+
+        static bool Weekend(DateTime d)
+        {
+            return d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday;
+        }
+
+        // from 다음 날부터 주말·공휴일이 아닌 첫 날을 대체공휴일로
+        static void AddSub(List<KeyValuePair<DateTime, string>> l, DateTime from, string name)
+        {
+            DateTime d = from.Date.AddDays(1);
+            while (Weekend(d) || CountOn(l, d) > 0) d = d.AddDays(1);
+            Add(l, d, name + " 대체공휴일");
+        }
+
+        // 설날·추석 연휴: 일요일이나 다른 공휴일과 겹친 날 수만큼
+        static void GroupSub(List<KeyValuePair<DateTime, string>> l, DateTime start, string name)
+        {
+            int over = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                DateTime d = start.AddDays(i);
+                if (d.DayOfWeek == DayOfWeek.Sunday || CountOn(l, d) > 1) over++;
+            }
+            for (int k = 0; k < over; k++) AddSub(l, start.AddDays(2), name);
+        }
+
+        static int CompareKv(KeyValuePair<DateTime, string> a, KeyValuePair<DateTime, string> b)
+        {
+            return a.Key.CompareTo(b.Key);
+        }
+
+        public static List<KeyValuePair<DateTime, string>> Builtin(int y)
+        {
+            List<KeyValuePair<DateTime, string>> l;
+            if (cache.TryGetValue(y, out l)) return l;
+            l = new List<KeyValuePair<DateTime, string>>();
+            if (y < 1950 || y > 9998) { cache[y] = l; return l; }
+
+            DateTime seol, buddha, chuseok;
+            bool hasSeol = Lunar(y, 1, 1, out seol);
+            bool hasBuddha = Lunar(y, 4, 8, out buddha);
+            bool hasChu = Lunar(y, 8, 15, out chuseok);
+
+            Add(l, new DateTime(y, 1, 1), "신정");
+            if (hasSeol) { Add(l, seol.AddDays(-1), "설날 연휴"); Add(l, seol, "설날"); Add(l, seol.AddDays(1), "설날 연휴"); }
+            Add(l, new DateTime(y, 3, 1), "삼일절");
+            Add(l, new DateTime(y, 5, 5), "어린이날");
+            if (hasBuddha) Add(l, buddha, "부처님오신날");
+            Add(l, new DateTime(y, 6, 6), "현충일");
+            Add(l, new DateTime(y, 8, 15), "광복절");
+            if (hasChu) { Add(l, chuseok.AddDays(-1), "추석 연휴"); Add(l, chuseok, "추석"); Add(l, chuseok.AddDays(1), "추석 연휴"); }
+            Add(l, new DateTime(y, 10, 3), "개천절");
+            Add(l, new DateTime(y, 10, 9), "한글날");
+            Add(l, new DateTime(y, 12, 25), "성탄절");
+
+            // 이미 정해진 선거일
+            if (y == 2026) Add(l, new DateTime(2026, 6, 3), "전국동시지방선거");
+            if (y == 2028) Add(l, new DateTime(2028, 4, 12), "국회의원선거");
+
+            // 대체공휴일
+            if (y >= 2014)
+            {
+                if (hasSeol) GroupSub(l, seol.AddDays(-1), "설날");
+                if (hasChu) GroupSub(l, chuseok.AddDays(-1), "추석");
+                DateTime kid = new DateTime(y, 5, 5);
+                if (Weekend(kid) || CountOn(l, kid) > 1) AddSub(l, kid, "어린이날");
+            }
+            if (y >= 2021)
+            {
+                DateTime[] nat = { new DateTime(y, 3, 1), new DateTime(y, 8, 15), new DateTime(y, 10, 3), new DateTime(y, 10, 9) };
+                string[] natName = { "삼일절", "광복절", "개천절", "한글날" };
+                for (int i = 0; i < nat.Length; i++)
+                    if (Weekend(nat[i])) AddSub(l, nat[i], natName[i]);
+            }
+            if (y >= 2023)
+            {
+                if (hasBuddha && Weekend(buddha)) AddSub(l, buddha, "부처님오신날");
+                DateTime xmas = new DateTime(y, 12, 25);
+                if (Weekend(xmas)) AddSub(l, xmas, "성탄절");
+            }
+
+            // 다른 해로 넘어간 날 (예: 1월 설 연휴 전날이 전년도 12월) 은 빼기
+            for (int i = l.Count - 1; i >= 0; i--) if (l[i].Key.Year != y) l.RemoveAt(i);
+            l.Sort(CompareKv);
+            cache[y] = l;
+            return l;
+        }
+    }
+
+    // ================= 캘린더 창 =================
+
+    public class MonthGrid : Panel
+    {
+        public MonthGrid()
+        {
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+        }
+    }
+
+    public class CalendarForm : Form
+    {
+        CalData cal;
+        float S;
+        int year, month;
+        DateTime selected;
+        bool searching = false;
+
+        MonthGrid grid;
+        Label monthLabel, dayHeader;
+        TextBox searchBox;
+        ListBox list;
+        Button prevBtn, nextBtn, todayBtn, addBtn, holBtn, editBtn, delBtn, newBtn;
+        Panel top, right;
+        FlowLayoutPanel rightBtns;
+        Font fDay, fSmall, fChip, fHead, fBold;
+        Dictionary<DateTime, List<CalEvent>> monthEvents = new Dictionary<DateTime, List<CalEvent>>();
+
+        Color cBack, cText, cMuted, cLine, cToday, cOther, cAccent;
+        static readonly Color C_SUN = Color.FromArgb(224, 62, 62);
+        static readonly Color C_SAT_LIGHT = Color.FromArgb(11, 107, 203);
+        static readonly Color C_SAT_DARK = Color.FromArgb(100, 165, 245);
+        Color C_SAT { get { return Skin.Dark ? C_SAT_DARK : C_SAT_LIGHT; } }
+
+        public event EventHandler Changed;
+
+        int Px(int v) { return (int)(v * S); }
+
+        public CalendarForm(CalData data, float scale)
+        {
+            cal = data;
+            S = scale;
+            Text = "AHNNOTE 캘린더";
+            Font = new Font("Malgun Gothic", 9f);
+            ClientSize = new Size(Px(940), Px(620));
+            MinimumSize = new Size(Px(640), Px(440));
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            KeyPreview = true;
+            try { Icon = Icon.FromHandle(AppIcon.DrawA(32).GetHicon()); } catch { }
+
+            fDay = new Font("Malgun Gothic", 9.5f, FontStyle.Bold);
+            fSmall = new Font("Malgun Gothic", 8f);
+            fChip = new Font("Malgun Gothic", 8f);
+            fHead = new Font("Malgun Gothic", 14f, FontStyle.Bold);
+            fBold = new Font("Malgun Gothic", 9f, FontStyle.Bold);
+
+            // 위쪽 줄
+            top = new Panel();
+            top.Dock = DockStyle.Top;
+            top.Height = Px(48);
+            top.Padding = new Padding(Px(10), Px(8), Px(10), Px(6));
+            FlowLayoutPanel flow = new FlowLayoutPanel();
+            flow.Dock = DockStyle.Fill;
+            flow.WrapContents = false;
+            prevBtn = TopButton("◀", Px(34));
+            monthLabel = new Label();
+            monthLabel.AutoSize = false;
+            monthLabel.Size = new Size(Px(150), Px(32));
+            monthLabel.TextAlign = ContentAlignment.MiddleCenter;
+            monthLabel.Font = fHead;
+            nextBtn = TopButton("▶", Px(34));
+            todayBtn = TopButton("오늘", Px(56));
+            addBtn = TopButton("+ 일정", Px(70));
+            holBtn = TopButton("공휴일 관리", Px(96));
+            Label sl = new Label();
+            sl.Text = "검색";
+            sl.AutoSize = false;
+            sl.Size = new Size(Px(40), Px(32));
+            sl.TextAlign = ContentAlignment.MiddleRight;
+            searchBox = new TextBox();
+            searchBox.Width = Px(170);
+            searchBox.Margin = new Padding(Px(4), Px(5), 0, 0);
+            flow.Controls.Add(prevBtn);
+            flow.Controls.Add(monthLabel);
+            flow.Controls.Add(nextBtn);
+            flow.Controls.Add(todayBtn);
+            flow.Controls.Add(addBtn);
+            flow.Controls.Add(holBtn);
+            flow.Controls.Add(sl);
+            flow.Controls.Add(searchBox);
+            top.Controls.Add(flow);
+
+            prevBtn.Click += new EventHandler(Prev_Click);
+            nextBtn.Click += new EventHandler(Next_Click);
+            todayBtn.Click += new EventHandler(Today_Click);
+            addBtn.Click += new EventHandler(Add_Click);
+            holBtn.Click += new EventHandler(Hol_Click);
+            searchBox.TextChanged += new EventHandler(Search_Changed);
+
+            // 오른쪽: 선택한 날 일정 / 검색 결과
+            right = new Panel();
+            right.Dock = DockStyle.Right;
+            right.Width = Px(290);
+            right.Padding = new Padding(Px(8), 0, Px(10), Px(10));
+            dayHeader = new Label();
+            dayHeader.Dock = DockStyle.Top;
+            dayHeader.Height = Px(46);
+            dayHeader.TextAlign = ContentAlignment.MiddleLeft;
+            dayHeader.Font = new Font("Malgun Gothic", 10.5f, FontStyle.Bold);
+            list = new ListBox();
+            list.Dock = DockStyle.Fill;
+            list.BorderStyle = BorderStyle.None;
+            list.DrawMode = DrawMode.OwnerDrawFixed;
+            list.ItemHeight = Px(48);
+            list.IntegralHeight = false;
+            list.DrawItem += new DrawItemEventHandler(List_DrawItem);
+            list.DoubleClick += new EventHandler(Edit_Click);
+            list.SelectedIndexChanged += new EventHandler(List_Selected);
+            list.KeyDown += new KeyEventHandler(List_KeyDown);
+            rightBtns = new FlowLayoutPanel();
+            rightBtns.Dock = DockStyle.Bottom;
+            rightBtns.Height = Px(40);
+            rightBtns.Padding = new Padding(0, Px(6), 0, 0);
+            newBtn = TopButton("추가", Px(70));
+            editBtn = TopButton("수정", Px(70));
+            delBtn = TopButton("삭제", Px(70));
+            rightBtns.Controls.Add(newBtn);
+            rightBtns.Controls.Add(editBtn);
+            rightBtns.Controls.Add(delBtn);
+            newBtn.Click += new EventHandler(Add_Click);
+            editBtn.Click += new EventHandler(Edit_Click);
+            delBtn.Click += new EventHandler(Del_Click);
+            right.Controls.Add(list);
+            right.Controls.Add(dayHeader);
+            right.Controls.Add(rightBtns);
+
+            // 달력
+            grid = new MonthGrid();
+            grid.Dock = DockStyle.Fill;
+            grid.Paint += new PaintEventHandler(Grid_Paint);
+            grid.MouseDown += new MouseEventHandler(Grid_MouseDown);
+            grid.MouseDoubleClick += new MouseEventHandler(Grid_DoubleClick);
+
+            Controls.Add(grid);
+            Controls.Add(right);
+            Controls.Add(top);
+
+            DateTime today = DateTime.Today;
+            year = today.Year;
+            month = today.Month;
+            selected = today;
+            ApplyColors();
+            Reload();
+        }
+
+        Button TopButton(string text, int width)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.Size = new Size(width, Px(30));
+            b.Margin = new Padding(Px(2), Px(1), Px(2), 0);
+            return b;
+        }
+
+        public void ApplyColors()
+        {
+            bool dark = Skin.Dark;
+            cBack = dark ? Color.FromArgb(32, 32, 32) : Color.White;
+            cText = dark ? Color.FromArgb(232, 232, 232) : Color.FromArgb(32, 32, 32);
+            cMuted = dark ? Color.FromArgb(120, 124, 130) : Color.FromArgb(170, 174, 180);
+            cLine = dark ? Color.FromArgb(55, 55, 58) : Color.FromArgb(222, 226, 232);
+            cToday = dark ? Color.FromArgb(30, 50, 75) : Color.FromArgb(232, 242, 252);
+            cOther = dark ? Color.FromArgb(27, 27, 29) : Color.FromArgb(248, 249, 251);
+            cAccent = dark ? Color.FromArgb(96, 180, 255) : Color.FromArgb(0, 103, 192);
+            Skin.Apply(this);
+            BackColor = cBack;
+            top.BackColor = dark ? Color.FromArgb(43, 43, 45) : Color.White;
+            right.BackColor = cBack;
+            list.BackColor = cBack;
+            list.ForeColor = cText;
+            dayHeader.ForeColor = cText;
+            monthLabel.ForeColor = cText;
+            grid.BackColor = cBack;
+            Skin.ScrollBars(list, dark);
+            grid.Invalidate();
+            list.Invalidate();
+        }
+
+        // 데이터가 바뀌었을 때
+        public void Reload()
+        {
+            monthEvents.Clear();
+            foreach (CalEvent ev in cal.Events)
+            {
+                List<CalEvent> l;
+                if (!monthEvents.TryGetValue(ev.Date, out l)) { l = new List<CalEvent>(); monthEvents[ev.Date] = l; }
+                l.Add(ev);
+            }
+            foreach (List<CalEvent> l in monthEvents.Values) l.Sort(CalData.CompareEvents);
+            monthLabel.Text = year + "년 " + month + "월";
+            FillList();
+            grid.Invalidate();
+        }
+
+        public void GoTo(DateTime d)
+        {
+            year = d.Year;
+            month = d.Month;
+            selected = d.Date;
+            Reload();
+        }
+
+        void FillList()
+        {
+            CalEvent keep = list.SelectedItem as CalEvent;
+            list.BeginUpdate();
+            list.Items.Clear();
+            List<CalEvent> items;
+            if (searching)
+            {
+                items = cal.Search(searchBox.Text.Trim());
+                dayHeader.Text = "검색 결과 " + items.Count + "개";
+            }
+            else
+            {
+                items = cal.EventsOn(selected);
+                string h = cal.HolidayName(selected);
+                dayHeader.Text = selected.ToString("M월 d일 dddd") + (h != null ? "   " + h : "");
+            }
+            foreach (CalEvent ev in items) list.Items.Add(ev);
+            if (keep != null && list.Items.Contains(keep)) list.SelectedItem = keep;
+            list.EndUpdate();
+            UpdateButtons();
+        }
+
+        void UpdateButtons()
+        {
+            bool has = list.SelectedItem != null;
+            editBtn.Enabled = has;
+            delBtn.Enabled = has;
+        }
+
+        // ---------- 달력 그리기 ----------
+
+        DateTime GridStart()
+        {
+            DateTime first = new DateTime(year, month, 1);
+            return first.AddDays(-(int)first.DayOfWeek);
+        }
+
+        Rectangle CellRect(int i, int headH, float cw, float ch)
+        {
+            int col = i % 7, row = i / 7;
+            int x = (int)(col * cw), y = headH + (int)(row * ch);
+            return new Rectangle(x, y, (int)((col + 1) * cw) - x, headH + (int)((row + 1) * ch) - y);
+        }
+
+        void Grid_Paint(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            int w = grid.ClientSize.Width - 1, h = grid.ClientSize.Height - 1;
+            int headH = Px(28);
+            float cw = w / 7f, ch = (h - headH) / 6f;
+            string[] wd = { "일", "월", "화", "수", "목", "금", "토" };
+            using (Pen line = new Pen(cLine))
+            {
+                for (int c = 0; c < 7; c++)
+                {
+                    Rectangle r = new Rectangle((int)(c * cw), 0, (int)cw, headH);
+                    Color col = c == 0 ? C_SUN : c == 6 ? C_SAT : cMuted;
+                    TextRenderer.DrawText(g, wd[c], fSmall, r, col, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+                DateTime start = GridStart();
+                DateTime today = DateTime.Today;
+                for (int i = 0; i < 42; i++)
+                {
+                    DateTime d = start.AddDays(i);
+                    Rectangle r = CellRect(i, headH, cw, ch);
+                    bool other = d.Month != month;
+                    Color back = other ? cOther : cBack;
+                    if (d == today) back = cToday;
+                    using (SolidBrush b = new SolidBrush(back)) g.FillRectangle(b, r);
+                    g.DrawRectangle(line, r);
+                    if (d == selected)
+                    {
+                        using (Pen p = new Pen(cAccent, Math.Max(2, Px(2))))
+                            g.DrawRectangle(p, r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2);
+                    }
+
+                    string hol = cal.HolidayName(d);
+                    Color dc = cText;
+                    if (d.DayOfWeek == DayOfWeek.Sunday || hol != null) dc = C_SUN;
+                    else if (d.DayOfWeek == DayOfWeek.Saturday) dc = C_SAT;
+                    if (other) dc = Color.FromArgb(110, dc);
+                    Rectangle nr = new Rectangle(r.X + Px(6), r.Y + Px(3), Px(26), Px(18));
+                    TextRenderer.DrawText(g, d.Day.ToString(), fDay, nr, dc, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    if (hol != null)
+                    {
+                        Rectangle hr = new Rectangle(r.X + Px(30), r.Y + Px(4), r.Width - Px(34), Px(16));
+                        TextRenderer.DrawText(g, hol, fSmall, hr, other ? Color.FromArgb(120, C_SUN) : C_SUN,
+                            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                    }
+
+                    // 일정 라벨
+                    List<CalEvent> evs;
+                    if (!monthEvents.TryGetValue(d, out evs)) continue;
+                    int chipH = Px(17), gap = Px(2);
+                    int y0 = r.Y + Px(23);
+                    int fit = Math.Max(0, (r.Bottom - Px(2) - y0) / (chipH + gap));
+                    int show = evs.Count <= fit ? evs.Count : Math.Max(0, fit - 1);
+                    for (int k = 0; k < show; k++)
+                    {
+                        CalEvent ev = evs[k];
+                        Rectangle cr = new Rectangle(r.X + Px(3), y0 + k * (chipH + gap), r.Width - Px(6), chipH);
+                        Color lc = CalData.LABEL[ev.Color];
+                        if (other) lc = Color.FromArgb(140, lc);
+                        using (SolidBrush b = new SolidBrush(lc)) g.FillRectangle(b, cr);
+                        string t = (ev.HasTime ? ev.Date.AddMinutes(ev.Minutes).ToString("H:mm") + " " : "") + ev.Title;
+                        Rectangle tr = new Rectangle(cr.X + Px(3), cr.Y, cr.Width - Px(4), cr.Height);
+                        TextRenderer.DrawText(g, t, fChip, tr, Color.White,
+                            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                    }
+                    if (show < evs.Count && fit > 0)
+                    {
+                        Rectangle mr = new Rectangle(r.X + Px(5), y0 + show * (chipH + gap), r.Width - Px(8), chipH);
+                        TextRenderer.DrawText(g, "+" + (evs.Count - show) + "개 더", fSmall, mr, cMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    }
+                }
+            }
+        }
+
+        DateTime? DateAt(Point p)
+        {
+            int w = grid.ClientSize.Width - 1, h = grid.ClientSize.Height - 1;
+            int headH = Px(28);
+            if (p.Y < headH) return null;
+            float cw = w / 7f, ch = (h - headH) / 6f;
+            int col = Math.Min(6, (int)(p.X / cw));
+            int row = Math.Min(5, (int)((p.Y - headH) / ch));
+            return GridStart().AddDays(row * 7 + col);
+        }
+
+        void Grid_MouseDown(object sender, MouseEventArgs e)
+        {
+            DateTime? d = DateAt(e.Location);
+            if (!d.HasValue) return;
+            if (searching) { searchBox.Text = ""; }
+            selected = d.Value;
+            if (selected.Month != month || selected.Year != year) { year = selected.Year; month = selected.Month; Reload(); }
+            else { FillList(); grid.Invalidate(); }
+        }
+
+        void Grid_DoubleClick(object sender, MouseEventArgs e)
+        {
+            DateTime? d = DateAt(e.Location);
+            if (!d.HasValue) return;
+            selected = d.Value;
+            EditEvent(null);
+        }
+
+        // ---------- 오른쪽 목록 ----------
+
+        void List_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= list.Items.Count) return;
+            CalEvent ev = (CalEvent)list.Items[e.Index];
+            bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            Color back = sel ? (Skin.Dark ? Color.FromArgb(38, 60, 88) : Color.FromArgb(217, 233, 250)) : cBack;
+            using (SolidBrush b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
+            using (SolidBrush b = new SolidBrush(CalData.LABEL[ev.Color]))
+                e.Graphics.FillRectangle(b, e.Bounds.X + Px(2), e.Bounds.Y + Px(7), Px(5), e.Bounds.Height - Px(14));
+            int x = e.Bounds.X + Px(14);
+            Rectangle r1 = new Rectangle(x, e.Bounds.Y + Px(5), e.Bounds.Right - x - Px(4), Px(20));
+            Rectangle r2 = new Rectangle(x, e.Bounds.Y + Px(25), e.Bounds.Right - x - Px(4), Px(18));
+            TextRenderer.DrawText(e.Graphics, ev.Title, fBold, r1, cText,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            string sub = (searching ? ev.Date.ToString("yyyy-MM-dd (ddd)") + "  " : "") + ev.TimeText();
+            if (ev.Alarms.Count > 0) sub += "   알림 " + ev.Alarms.Count + "개";
+            if (ev.Body.Length > 0 && !searching) sub += "   " + ev.Body.Replace("\r\n", " ");
+            TextRenderer.DrawText(e.Graphics, sub, fSmall, r2, cMuted,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        }
+
+        void List_Selected(object sender, EventArgs e)
+        {
+            UpdateButtons();
+            CalEvent ev = list.SelectedItem as CalEvent;
+            if (searching && ev != null && (ev.Date.Year != year || ev.Date.Month != month || ev.Date != selected))
+            {
+                year = ev.Date.Year;
+                month = ev.Date.Month;
+                selected = ev.Date;
+                monthLabel.Text = year + "년 " + month + "월";
+                grid.Invalidate();
+            }
+        }
+
+        void List_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Delete) { Del_Click(sender, e); e.Handled = true; }
+            else if (e.KeyCode == Keys.Enter) { Edit_Click(sender, e); e.Handled = true; }
+        }
+
+        // ---------- 버튼 ----------
+
+        void Prev_Click(object sender, EventArgs e) { MoveMonth(-1); }
+        void Next_Click(object sender, EventArgs e) { MoveMonth(1); }
+        void Today_Click(object sender, EventArgs e) { searchBox.Text = ""; GoTo(DateTime.Today); }
+
+        void MoveMonth(int delta)
+        {
+            DateTime d = new DateTime(year, month, 1).AddMonths(delta);
+            year = d.Year;
+            month = d.Month;
+            int day = Math.Min(selected.Day, DateTime.DaysInMonth(year, month));
+            selected = new DateTime(year, month, day);
+            Reload();
+        }
+
+        void Search_Changed(object sender, EventArgs e)
+        {
+            searching = searchBox.Text.Trim().Length > 0;
+            FillList();
+        }
+
+        void Add_Click(object sender, EventArgs e) { EditEvent(null); }
+
+        void Edit_Click(object sender, EventArgs e)
+        {
+            CalEvent ev = list.SelectedItem as CalEvent;
+            if (ev != null) EditEvent(ev);
+        }
+
+        void Del_Click(object sender, EventArgs e)
+        {
+            CalEvent ev = list.SelectedItem as CalEvent;
+            if (ev == null) return;
+            if (MessageBox.Show(this, "'" + ev.Title + "' 일정을 삭제할까요?", "AHNNOTE",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            cal.Events.Remove(ev);
+            cal.Save();
+            Reload();
+            if (Changed != null) Changed(this, EventArgs.Empty);
+        }
+
+        void EditEvent(CalEvent ev)
+        {
+            using (EventForm f = new EventForm(ev, ev == null ? selected : ev.Date, S))
+            {
+                f.TopMost = TopMost;
+                if (f.ShowDialog(this) != DialogResult.OK) return;
+                if (ev == null)
+                {
+                    ev = f.Result;
+                    ev.Id = DateTime.Now.Ticks.ToString();
+                    cal.Events.Add(ev);
+                }
+                else f.CopyTo(ev);
+                // 이미 지난 알림은 울리지 않음
+                ev.Fired.Clear();
+                DateTime b = ev.Base();
+                foreach (int m in ev.Alarms) if (b.AddMinutes(-m) <= DateTime.Now) ev.Fired.Add(m);
+                cal.Save();
+                if (!searching) { selected = ev.Date; year = ev.Date.Year; month = ev.Date.Month; }
+                Reload();
+                list.SelectedItem = ev;
+                if (Changed != null) Changed(this, EventArgs.Empty);
+            }
+        }
+
+        void Hol_Click(object sender, EventArgs e)
+        {
+            using (HolidayForm f = new HolidayForm(cal, year, S))
+            {
+                f.TopMost = TopMost;
+                f.ShowDialog(this);
+            }
+            Reload();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape) { Close(); return true; }
+            if (keyData == (Keys.Control | Keys.F)) { searchBox.Focus(); searchBox.SelectAll(); return true; }
+            if (keyData == (Keys.Control | Keys.N)) { EditEvent(null); return true; }
+            if (keyData == Keys.PageUp) { MoveMonth(-1); return true; }
+            if (keyData == Keys.PageDown) { MoveMonth(1); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+    }
+
+    // ================= 일정 입력 창 =================
+
+    public class EventForm : Form
+    {
+        public CalEvent Result;
+        TextBox titleBox, bodyBox;
+        DateTimePicker datePick, timePick;
+        CheckBox timeChk;
+        Button[] colorBtns;
+        int color = 0;
+        ComboBox presetBox, unitBox;
+        NumericUpDown numBox;
+        ListBox alarmList;
+        Button alarmAdd, alarmDel;
+        List<int> alarms = new List<int>();
+        float S;
+
+        static readonly int[] PRESET = { 30, 60, 1440, 2880, 10080, -1 };
+        static readonly string[] PRESET_NAME = { "30분 전", "1시간 전", "1일 전", "2일 전", "7일 전", "직접 설정" };
+
+        int Px(int v) { return (int)(v * S); }
+
+        public static string AlarmText(int m)
+        {
+            if (m == 0) return "정시";
+            if (m % 1440 == 0) return (m / 1440) + "일 전";
+            if (m % 60 == 0) return (m / 60) + "시간 전";
+            return m + "분 전";
+        }
+
+        Label AddLabel(string text, int x, int y, int w)
+        {
+            Label l = new Label();
+            l.Text = text;
+            l.SetBounds(Px(x), Px(y), Px(w), Px(22));
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            Controls.Add(l);
+            return l;
+        }
+
+        public EventForm(CalEvent ev, DateTime date, float scale)
+        {
+            S = scale;
+            Text = ev == null ? "새 일정" : "일정 수정";
+            Font = new Font("Malgun Gothic", 9f);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(Px(420), Px(500));
+
+            AddLabel("제목", 14, 14, 60);
+            titleBox = new TextBox();
+            titleBox.SetBounds(Px(80), Px(14), Px(326), Px(24));
+            Controls.Add(titleBox);
+
+            AddLabel("라벨 색", 14, 48, 60);
+            colorBtns = new Button[CalData.LABEL.Length];
+            for (int i = 0; i < colorBtns.Length; i++)
+            {
+                Button b = new Button();
+                b.SetBounds(Px(80 + i * 30), Px(48), Px(24), Px(22));
+                b.FlatStyle = FlatStyle.Flat;
+                b.Font = new Font("Segoe UI Symbol", 9f, FontStyle.Bold);
+                b.Padding = new Padding(0);
+                b.BackColor = CalData.LABEL[i];
+                b.Tag = i;
+                b.TabStop = false;
+                b.Click += new EventHandler(Color_Click);
+                colorBtns[i] = b;
+                Controls.Add(b);
+            }
+
+            AddLabel("날짜", 14, 82, 60);
+            datePick = new DateTimePicker();
+            datePick.Format = DateTimePickerFormat.Long;
+            datePick.SetBounds(Px(80), Px(82), Px(220), Px(24));
+            Controls.Add(datePick);
+
+            timeChk = new CheckBox();
+            timeChk.Text = "시간";
+            timeChk.SetBounds(Px(14), Px(114), Px(62), Px(24));
+            timeChk.CheckedChanged += new EventHandler(TimeChk_Changed);
+            Controls.Add(timeChk);
+            timePick = new DateTimePicker();
+            timePick.Format = DateTimePickerFormat.Custom;
+            timePick.CustomFormat = "tt h:mm";
+            timePick.ShowUpDown = true;
+            timePick.SetBounds(Px(80), Px(114), Px(120), Px(24));
+            Controls.Add(timePick);
+            Label allDay = AddLabel("체크하지 않으면 종일 일정", 208, 114, 200);
+            allDay.ForeColor = Color.Gray;
+
+            AddLabel("내용", 14, 148, 60);
+            bodyBox = new TextBox();
+            bodyBox.Multiline = true;
+            bodyBox.ScrollBars = ScrollBars.Vertical;
+            bodyBox.AcceptsReturn = true;
+            bodyBox.SetBounds(Px(80), Px(148), Px(326), Px(110));
+            Controls.Add(bodyBox);
+
+            AddLabel("알림", 14, 272, 60);
+            presetBox = new ComboBox();
+            presetBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            presetBox.Items.AddRange(PRESET_NAME);
+            presetBox.SelectedIndex = 0;
+            presetBox.SetBounds(Px(80), Px(272), Px(100), Px(24));
+            presetBox.SelectedIndexChanged += new EventHandler(Preset_Changed);
+            Controls.Add(presetBox);
+            numBox = new NumericUpDown();
+            numBox.Minimum = 1;
+            numBox.Maximum = 999;
+            numBox.Value = 10;
+            numBox.SetBounds(Px(186), Px(272), Px(56), Px(24));
+            Controls.Add(numBox);
+            unitBox = new ComboBox();
+            unitBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            unitBox.Items.AddRange(new string[] { "분 전", "시간 전", "일 전" });
+            unitBox.SelectedIndex = 0;
+            unitBox.SetBounds(Px(246), Px(272), Px(76), Px(24));
+            Controls.Add(unitBox);
+            alarmAdd = new Button();
+            alarmAdd.Text = "추가";
+            alarmAdd.SetBounds(Px(328), Px(271), Px(78), Px(26));
+            alarmAdd.Click += new EventHandler(AlarmAdd_Click);
+            Controls.Add(alarmAdd);
+
+            alarmList = new ListBox();
+            alarmList.SetBounds(Px(80), Px(304), Px(242), Px(96));
+            alarmList.IntegralHeight = false;
+            Controls.Add(alarmList);
+            alarmDel = new Button();
+            alarmDel.Text = "알림 삭제";
+            alarmDel.SetBounds(Px(328), Px(304), Px(78), Px(26));
+            alarmDel.Click += new EventHandler(AlarmDel_Click);
+            Controls.Add(alarmDel);
+            Label note = AddLabel("최대 5개. 종일 일정은 그날 오전 9시 기준", 80, 404, 326);
+            note.ForeColor = Color.Gray;
+
+            Button ok = new Button();
+            ok.Text = "저장";
+            ok.SetBounds(Px(240), Px(456), Px(80), Px(30));
+            ok.Click += new EventHandler(Ok_Click);
+            Controls.Add(ok);
+            Button cancel = new Button();
+            cancel.Text = "취소";
+            cancel.DialogResult = DialogResult.Cancel;
+            cancel.SetBounds(Px(326), Px(456), Px(80), Px(30));
+            Controls.Add(cancel);
+            AcceptButton = null;
+            CancelButton = cancel;
+
+            // 값 채우기
+            datePick.Value = date.Date;
+            timePick.Value = DateTime.Today.AddHours(9);
+            if (ev != null)
+            {
+                titleBox.Text = ev.Title;
+                bodyBox.Text = ev.Body;
+                color = ev.Color;
+                timeChk.Checked = ev.HasTime;
+                if (ev.HasTime) timePick.Value = DateTime.Today.AddMinutes(ev.Minutes);
+                alarms.AddRange(ev.Alarms);
+            }
+            TimeChk_Changed(null, EventArgs.Empty);
+            Preset_Changed(null, EventArgs.Empty);
+            ShowColors();
+            ShowAlarms();
+            Skin.Apply(this);
+            ShowColors();
+            ActiveControl = titleBox;
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Activate();
+            titleBox.Focus();
+            titleBox.SelectAll();
+        }
+
+        void ShowColors()
+        {
+            for (int i = 0; i < colorBtns.Length; i++)
+            {
+                colorBtns[i].BackColor = CalData.LABEL[i];
+                colorBtns[i].ForeColor = Color.White;
+                colorBtns[i].Text = i == color ? "✓" : "";
+                colorBtns[i].FlatAppearance.BorderSize = i == color ? Math.Max(2, Px(3)) : 0;
+                colorBtns[i].FlatAppearance.BorderColor = Skin.Dark ? Color.White : Color.Black;
+            }
+        }
+
+        void ShowAlarms()
+        {
+            alarms.Sort();
+            alarmList.Items.Clear();
+            foreach (int m in alarms) alarmList.Items.Add(AlarmText(m));
+            alarmAdd.Enabled = alarms.Count < 5;
+        }
+
+        void Color_Click(object sender, EventArgs e)
+        {
+            color = (int)((Button)sender).Tag;
+            ShowColors();
+        }
+
+        void TimeChk_Changed(object sender, EventArgs e) { timePick.Enabled = timeChk.Checked; }
+
+        void Preset_Changed(object sender, EventArgs e)
+        {
+            bool custom = PRESET[presetBox.SelectedIndex] < 0;
+            numBox.Enabled = custom;
+            unitBox.Enabled = custom;
+        }
+
+        void AlarmAdd_Click(object sender, EventArgs e)
+        {
+            if (alarms.Count >= 5) return;
+            int m = PRESET[presetBox.SelectedIndex];
+            if (m < 0)
+            {
+                int n = (int)numBox.Value;
+                m = unitBox.SelectedIndex == 2 ? n * 1440 : unitBox.SelectedIndex == 1 ? n * 60 : n;
+            }
+            if (alarms.IndexOf(m) < 0) alarms.Add(m);
+            ShowAlarms();
+        }
+
+        void AlarmDel_Click(object sender, EventArgs e)
+        {
+            int i = alarmList.SelectedIndex;
+            if (i < 0) return;
+            alarms.RemoveAt(i);
+            ShowAlarms();
+        }
+
+        void Ok_Click(object sender, EventArgs e)
+        {
+            if (titleBox.Text.Trim().Length == 0)
+            {
+                MessageBox.Show(this, "제목을 입력하세요.", "AHNNOTE");
+                titleBox.Focus();
+                return;
+            }
+            Result = new CalEvent();
+            CopyTo(Result);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        public void CopyTo(CalEvent ev)
+        {
+            ev.Title = titleBox.Text.Trim();
+            ev.Body = bodyBox.Text;
+            ev.Date = datePick.Value.Date;
+            ev.HasTime = timeChk.Checked;
+            ev.Minutes = timePick.Value.Hour * 60 + timePick.Value.Minute;
+            ev.Color = color;
+            ev.Alarms = new List<int>(alarms);
+        }
+    }
+
+    // ================= 공휴일 관리 창 =================
+
+    public class HolidayForm : Form
+    {
+        CalData cal;
+        NumericUpDown yearBox;
+        ListBox list;
+        DateTimePicker addDate;
+        TextBox addName;
+        List<DateTime> keys = new List<DateTime>();
+        float S;
+
+        int Px(int v) { return (int)(v * S); }
+
+        public HolidayForm(CalData data, int year, float scale)
+        {
+            cal = data;
+            S = scale;
+            Text = "공휴일 관리";
+            Font = new Font("Malgun Gothic", 9f);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(Px(440), Px(470));
+
+            Label yl = new Label();
+            yl.Text = "연도";
+            yl.SetBounds(Px(14), Px(16), Px(40), Px(22));
+            Controls.Add(yl);
+            yearBox = new NumericUpDown();
+            yearBox.Minimum = 1950;
+            yearBox.Maximum = 2100;
+            yearBox.Value = Math.Max(1950, Math.Min(2100, year));
+            yearBox.SetBounds(Px(58), Px(14), Px(80), Px(24));
+            yearBox.ValueChanged += new EventHandler(Year_Changed);
+            Controls.Add(yearBox);
+
+            list = new ListBox();
+            list.SetBounds(Px(14), Px(48), Px(412), Px(250));
+            list.IntegralHeight = false;
+            Controls.Add(list);
+
+            Button del = new Button();
+            del.Text = "선택 삭제";
+            del.SetBounds(Px(14), Px(304), Px(100), Px(28));
+            del.Click += new EventHandler(Del_Click);
+            Controls.Add(del);
+            Button reset = new Button();
+            reset.Text = "이 해 기본값으로";
+            reset.SetBounds(Px(120), Px(304), Px(130), Px(28));
+            reset.Click += new EventHandler(Reset_Click);
+            Controls.Add(reset);
+
+            Label al = new Label();
+            al.Text = "공휴일 추가 (임시공휴일 등)";
+            al.SetBounds(Px(14), Px(346), Px(300), Px(20));
+            Controls.Add(al);
+            addDate = new DateTimePicker();
+            addDate.Format = DateTimePickerFormat.Short;
+            addDate.SetBounds(Px(14), Px(370), Px(120), Px(24));
+            Controls.Add(addDate);
+            addName = new TextBox();
+            addName.Text = "임시공휴일";
+            addName.SetBounds(Px(140), Px(370), Px(200), Px(24));
+            Controls.Add(addName);
+            Button add = new Button();
+            add.Text = "추가";
+            add.SetBounds(Px(346), Px(369), Px(80), Px(26));
+            add.Click += new EventHandler(Add_Click);
+            Controls.Add(add);
+
+            Label note = new Label();
+            note.Text = "설날·추석·부처님오신날과 대체공휴일은 2050년까지 자동으로 들어갑니다.\n바뀐 날은 삭제하거나 직접 추가하세요.";
+            note.ForeColor = Color.Gray;
+            note.SetBounds(Px(14), Px(404), Px(412), Px(36));
+            Controls.Add(note);
+
+            Button close = new Button();
+            close.Text = "닫기";
+            close.DialogResult = DialogResult.Cancel;
+            close.SetBounds(Px(346), Px(434), Px(80), Px(28));
+            Controls.Add(close);
+            CancelButton = close;
+
+            addDate.Value = new DateTime((int)yearBox.Value, Math.Max(1, Math.Min(12, DateTime.Today.Month)), 1);
+            Fill();
+            Skin.Apply(this);
+        }
+
+        void Fill()
+        {
+            int y = (int)yearBox.Value;
+            Dictionary<DateTime, string> h = cal.Holidays(y);
+            keys = new List<DateTime>(h.Keys);
+            keys.Sort();
+            list.BeginUpdate();
+            list.Items.Clear();
+            foreach (DateTime d in keys)
+            {
+                string mark = cal.HolAdd.ContainsKey(d) ? "   [직접 추가]" : "";
+                list.Items.Add(d.ToString("M월 d일 (ddd)") + "   " + h[d] + mark);
+            }
+            list.EndUpdate();
+        }
+
+        void Year_Changed(object sender, EventArgs e)
+        {
+            int y = (int)yearBox.Value;
+            try { addDate.Value = new DateTime(y, addDate.Value.Month, Math.Min(addDate.Value.Day, DateTime.DaysInMonth(y, addDate.Value.Month))); } catch { }
+            Fill();
+        }
+
+        void Del_Click(object sender, EventArgs e)
+        {
+            int i = list.SelectedIndex;
+            if (i < 0) return;
+            DateTime d = keys[i];
+            if (cal.HolAdd.ContainsKey(d)) cal.HolAdd.Remove(d);
+            // 기본 공휴일이 있는 날이면 숨김
+            foreach (KeyValuePair<DateTime, string> kv in KHoliday.Builtin(d.Year))
+                if (kv.Key == d) { cal.HolDel[d] = true; break; }
+            cal.SaveHolidays();
+            Fill();
+        }
+
+        void Reset_Click(object sender, EventArgs e)
+        {
+            int y = (int)yearBox.Value;
+            List<DateTime> rm = new List<DateTime>();
+            foreach (DateTime d in cal.HolAdd.Keys) if (d.Year == y) rm.Add(d);
+            foreach (DateTime d in rm) cal.HolAdd.Remove(d);
+            rm.Clear();
+            foreach (DateTime d in cal.HolDel.Keys) if (d.Year == y) rm.Add(d);
+            foreach (DateTime d in rm) cal.HolDel.Remove(d);
+            cal.SaveHolidays();
+            Fill();
+        }
+
+        void Add_Click(object sender, EventArgs e)
+        {
+            string name = addName.Text.Trim();
+            if (name.Length == 0) name = "공휴일";
+            DateTime d = addDate.Value.Date;
+            cal.HolAdd[d] = name;
+            cal.SaveHolidays();
+            if (d.Year != (int)yearBox.Value) yearBox.Value = d.Year;
+            Fill();
+        }
+    }
+
+    // ================= 알림 팝업 =================
+
+    public class AlarmPopup : Form
+    {
+        static List<AlarmPopup> open = new List<AlarmPopup>();
+        public DateTime Target;
+        public event EventHandler OpenCalendar;
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        public AlarmPopup(string head, string title, string detail, DateTime target, float s)
+        {
+            Target = target;
+            Text = "AHNNOTE 알림";
+            Font = new Font("Malgun Gothic", 9f);
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+
+            int lines = 1;
+            foreach (char c in detail) if (c == '\n') lines++;
+            lines = Math.Min(lines, 8);
+            int w = (int)(320 * s);
+            int detailH = (int)((18 * lines + 4) * s);
+            ClientSize = new Size(w, (int)(96 * s) + detailH);
+
+            Label hl = new Label();
+            hl.Text = head;
+            hl.Font = new Font("Malgun Gothic", 8.5f, FontStyle.Bold);
+            hl.ForeColor = Skin.Dark ? Color.FromArgb(96, 180, 255) : Color.FromArgb(0, 103, 192);
+            hl.SetBounds((int)(14 * s), (int)(10 * s), w - (int)(28 * s), (int)(18 * s));
+            Label tl = new Label();
+            tl.Text = title;
+            tl.Font = new Font("Malgun Gothic", 11f, FontStyle.Bold);
+            tl.AutoEllipsis = true;
+            tl.SetBounds((int)(14 * s), (int)(30 * s), w - (int)(28 * s), (int)(24 * s));
+            Label dl = new Label();
+            dl.Text = detail;
+            dl.AutoEllipsis = true;
+            dl.SetBounds((int)(14 * s), (int)(56 * s), w - (int)(28 * s), detailH);
+
+            Button openBtn = new Button();
+            openBtn.Text = "캘린더 열기";
+            openBtn.SetBounds(w - (int)(196 * s), (int)(62 * s) + detailH, (int)(100 * s), (int)(28 * s));
+            openBtn.Click += new EventHandler(Open_Click);
+            Button ok = new Button();
+            ok.Text = "확인";
+            ok.SetBounds(w - (int)(90 * s), (int)(62 * s) + detailH, (int)(76 * s), (int)(28 * s));
+            ok.Click += new EventHandler(Ok_Click);
+
+            Controls.Add(hl);
+            Controls.Add(tl);
+            Controls.Add(dl);
+            Controls.Add(openBtn);
+            Controls.Add(ok);
+            Skin.Apply(this);
+            hl.ForeColor = Skin.Dark ? Color.FromArgb(96, 180, 255) : Color.FromArgb(0, 103, 192);
+
+            // 화면 오른쪽 아래부터 위로 쌓기
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            int yPos = wa.Bottom - Height - (int)(12 * s);
+            foreach (AlarmPopup p in open) yPos = Math.Min(yPos, p.Top - Height - (int)(8 * s));
+            if (yPos < wa.Top) yPos = wa.Bottom - Height - (int)(12 * s);
+            Location = new Point(wa.Right - Width - (int)(12 * s), yPos);
+            open.Add(this);
+        }
+
+        void Open_Click(object sender, EventArgs e)
+        {
+            if (OpenCalendar != null) OpenCalendar(this, EventArgs.Empty);
+            Close();
+        }
+
+        void Ok_Click(object sender, EventArgs e) { Close(); }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            open.Remove(this);
+            base.OnFormClosed(e);
         }
     }
 }
