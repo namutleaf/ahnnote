@@ -568,6 +568,7 @@ namespace AhnNote
             pgMenu.Items.Insert(0, favMenuItem);
             stickyMenuItem = new ToolStripMenuItem("포스트잇으로 띄우기", null, new EventHandler(StickyOpen_Click));
             pgMenu.Items.Insert(0, stickyMenuItem);
+            pgMenu.Items.Insert(2, new ToolStripMenuItem("QR로 보기 (Ctrl+Shift+Q)", null, new EventHandler(Qr_Click)));
             pgMenu.Opening += new System.ComponentModel.CancelEventHandler(PgMenu_Opening);
             pgList.ContextMenuStrip = pgMenu;
 
@@ -682,6 +683,7 @@ namespace AhnNote
                 case Keys.Control | Keys.Shift | Keys.D: ToggleDark(); return true;
                 case Keys.Control | Keys.Shift | Keys.T: ToggleTop(); return true;
                 case Keys.Control | Keys.D: ToggleFavorite(); return true;
+                case Keys.Control | Keys.Shift | Keys.Q: ShowQr(); return true;
                 case Keys.Shift | Keys.F3: FindAgain(false); return true;
             }
 
@@ -1923,6 +1925,30 @@ namespace AhnNote
         {
             e.UseDefaultCursors = false;
             Cursor.Current = Bounds.Contains(Control.MousePosition) ? Cursors.No : Cursors.Hand;
+        }
+
+        // ================= QR 로 보기 =================
+
+        void Qr_Click(object sender, EventArgs e) { ShowQr(); }
+
+        void ShowQr()
+        {
+            if (curNotebook == null || curPage == null) return;
+            CommitTitle();
+            SaveCurrent();
+            StickyNote sn = FindSticky(curNotebook, curPage);
+            if (sn != null) sn.SaveNow();
+            string text = "";
+            using (RichTextBox tmp = new RichTextBox())
+            {
+                try { tmp.LoadFile(PagePath(curNotebook, curPage), RichTextBoxStreamType.RichText); text = tmp.Text; }
+                catch { text = ed.Text; }
+            }
+            using (QrForm f = new QrForm(curPage, text, S))
+            {
+                f.TopMost = TopMost;
+                f.ShowDialog(this);
+            }
         }
 
         // ================= 캘린더 / 알림 =================
@@ -3337,6 +3363,526 @@ namespace AhnNote
         void Paste_Click(object sender, EventArgs e) { Ed.PasteRich(); }
         void PastePlain_Click(object sender, EventArgs e) { Ed.PastePlain(); }
         void SelectAll_Click(object sender, EventArgs e) { Ed.SelectAll(); }
+    }
+
+    // ================= QR 코드 만들기 (외부 라이브러리 없이) =================
+    // 바이트 모드 + UTF-8 표시(ECI). 오류 정정 M, 너무 길면 L.
+
+    public class QrCode
+    {
+        public int Size;
+        public bool[,] Dark;     // [y, x]
+        bool[,] isFunc;
+        int version;
+        int ecl;                 // 0=L 1=M
+
+        static readonly int[,] ECC_PER_BLOCK = {
+            { -1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30 },
+            { -1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28 } };
+        static readonly int[,] NUM_BLOCKS = {
+            { -1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25 },
+            { -1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49 } };
+        static readonly int[] FORMAT_ECL = { 1, 0 };   // L=01, M=00
+
+        static int RawModules(int ver)
+        {
+            int r = (16 * ver + 128) * ver + 64;
+            if (ver >= 2)
+            {
+                int na = ver / 7 + 2;
+                r -= (25 * na - 10) * na - 55;
+                if (ver >= 7) r -= 36;
+            }
+            return r;
+        }
+
+        static int DataCodewords(int ver, int e)
+        {
+            return RawModules(ver) / 8 - ECC_PER_BLOCK[e, ver] * NUM_BLOCKS[e, ver];
+        }
+
+        static int BitsNeeded(int ver, int n)
+        {
+            return 4 + 8 + 4 + (ver <= 9 ? 8 : 16) + 8 * n;   // ECI(UTF-8) + 바이트 모드 + 길이 + 데이터
+        }
+
+        // 이 바이트 수가 QR 하나에 들어가는지
+        public static bool Fits(int n)
+        {
+            return BitsNeeded(40, n) <= DataCodewords(40, 0) * 8;
+        }
+
+        public static QrCode Encode(byte[] data)
+        {
+            for (int e = 1; e >= 0; e--)          // M 먼저, 안 되면 L
+                for (int v = 1; v <= 40; v++)
+                    if (BitsNeeded(v, data.Length) <= DataCodewords(v, e) * 8)
+                        return new QrCode(data, v, e);
+            throw new ArgumentException("QR 하나에 담기에는 너무 깁니다.");
+        }
+
+        QrCode(byte[] data, int ver, int e)
+        {
+            version = ver;
+            ecl = e;
+            Size = ver * 4 + 17;
+            Dark = new bool[Size, Size];
+            isFunc = new bool[Size, Size];
+
+            // 데이터 비트
+            List<bool> bits = new List<bool>();
+            AddBits(bits, 7, 4);            // ECI
+            AddBits(bits, 26, 8);           // UTF-8
+            AddBits(bits, 4, 4);            // 바이트 모드
+            AddBits(bits, data.Length, ver <= 9 ? 8 : 16);
+            foreach (byte b in data) AddBits(bits, b, 8);
+            int cap = DataCodewords(ver, e) * 8;
+            AddBits(bits, 0, Math.Min(4, cap - bits.Count));
+            AddBits(bits, 0, (8 - bits.Count % 8) % 8);
+            for (int pad = 0xEC; bits.Count < cap; pad ^= 0xEC ^ 0x11) AddBits(bits, pad, 8);
+            byte[] codewords = new byte[bits.Count / 8];
+            for (int i = 0; i < bits.Count; i++) if (bits[i]) codewords[i >> 3] |= (byte)(1 << (7 - (i & 7)));
+
+            byte[] all = AddEcc(codewords);
+            DrawFunctionPatterns();
+            DrawCodewords(all);
+
+            // 가장 보기 좋은 마스크 고르기
+            int best = 0, bestScore = int.MaxValue;
+            for (int m = 0; m < 8; m++)
+            {
+                ApplyMask(m);
+                DrawFormatBits(m);
+                int sc = Penalty();
+                if (sc < bestScore) { bestScore = sc; best = m; }
+                ApplyMask(m);   // 되돌리기
+            }
+            ApplyMask(best);
+            DrawFormatBits(best);
+        }
+
+        static void AddBits(List<bool> bits, int val, int len)
+        {
+            for (int i = len - 1; i >= 0; i--) bits.Add(((val >> i) & 1) != 0);
+        }
+
+        // ---------- 오류 정정 (리드-솔로몬) ----------
+
+        static int GfMul(int x, int y)
+        {
+            int z = 0;
+            for (int i = 7; i >= 0; i--)
+            {
+                z = (z << 1) ^ ((z >> 7) * 0x11D);
+                z ^= ((y >> i) & 1) * x;
+            }
+            return z;
+        }
+
+        static byte[] RsDivisor(int degree)
+        {
+            byte[] r = new byte[degree];
+            r[degree - 1] = 1;
+            int root = 1;
+            for (int i = 0; i < degree; i++)
+            {
+                for (int j = 0; j < r.Length; j++)
+                {
+                    r[j] = (byte)GfMul(r[j], root);
+                    if (j + 1 < r.Length) r[j] ^= r[j + 1];
+                }
+                root = GfMul(root, 0x02);
+            }
+            return r;
+        }
+
+        static byte[] RsRemainder(byte[] data, int off, int len, byte[] div)
+        {
+            byte[] r = new byte[div.Length];
+            for (int k = 0; k < len; k++)
+            {
+                int factor = data[off + k] ^ r[0];
+                Array.Copy(r, 1, r, 0, r.Length - 1);
+                r[r.Length - 1] = 0;
+                for (int i = 0; i < r.Length; i++) r[i] ^= (byte)GfMul(div[i], factor);
+            }
+            return r;
+        }
+
+        byte[] AddEcc(byte[] data)
+        {
+            int numBlocks = NUM_BLOCKS[ecl, version];
+            int eccLen = ECC_PER_BLOCK[ecl, version];
+            int raw = RawModules(version) / 8;
+            int numShort = numBlocks - raw % numBlocks;
+            int shortLen = raw / numBlocks;
+            byte[] div = RsDivisor(eccLen);
+            byte[][] blocks = new byte[numBlocks][];
+            int k = 0;
+            for (int i = 0; i < numBlocks; i++)
+            {
+                int datLen = shortLen - eccLen + (i < numShort ? 0 : 1);
+                byte[] ecc = RsRemainder(data, k, datLen, div);
+                byte[] blk = new byte[shortLen + 1];
+                Array.Copy(data, k, blk, 0, datLen);
+                k += datLen;
+                // 짧은 블록은 datLen 자리를 비워 둠 (아래에서 건너뜀)
+                Array.Copy(ecc, 0, blk, shortLen + 1 - eccLen, eccLen);
+                blocks[i] = blk;
+            }
+            byte[] result = new byte[raw];
+            int n = 0;
+            for (int i = 0; i < shortLen + 1; i++)
+                for (int j = 0; j < numBlocks; j++)
+                    if (i != shortLen - eccLen || j >= numShort) result[n++] = blocks[j][i];
+            return result;
+        }
+
+        // ---------- 고정 무늬 ----------
+
+        void SetFunc(int x, int y, bool dark)
+        {
+            Dark[y, x] = dark;
+            isFunc[y, x] = true;
+        }
+
+        void DrawFunctionPatterns()
+        {
+            for (int i = 0; i < Size; i++)
+            {
+                SetFunc(6, i, i % 2 == 0);
+                SetFunc(i, 6, i % 2 == 0);
+            }
+            DrawFinder(3, 3);
+            DrawFinder(Size - 4, 3);
+            DrawFinder(3, Size - 4);
+            int[] pos = AlignPositions();
+            int na = pos.Length;
+            for (int i = 0; i < na; i++)
+                for (int j = 0; j < na; j++)
+                {
+                    if ((i == 0 && j == 0) || (i == 0 && j == na - 1) || (i == na - 1 && j == 0)) continue;
+                    for (int dy = -2; dy <= 2; dy++)
+                        for (int dx = -2; dx <= 2; dx++)
+                            SetFunc(pos[i] + dx, pos[j] + dy, Math.Max(Math.Abs(dx), Math.Abs(dy)) != 1);
+                }
+            DrawFormatBits(0);
+            if (version >= 7)
+            {
+                int rem = version;
+                for (int i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >> 11) * 0x1F25);
+                int bits = version << 12 | rem;
+                for (int i = 0; i < 18; i++)
+                {
+                    bool bit = ((bits >> i) & 1) != 0;
+                    int a = Size - 11 + i % 3, b = i / 3;
+                    SetFunc(a, b, bit);
+                    SetFunc(b, a, bit);
+                }
+            }
+        }
+
+        void DrawFinder(int x, int y)
+        {
+            for (int dy = -4; dy <= 4; dy++)
+                for (int dx = -4; dx <= 4; dx++)
+                {
+                    int dist = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                    int xx = x + dx, yy = y + dy;
+                    if (xx >= 0 && xx < Size && yy >= 0 && yy < Size) SetFunc(xx, yy, dist != 2 && dist != 4);
+                }
+        }
+
+        int[] AlignPositions()
+        {
+            if (version == 1) return new int[0];
+            int na = version / 7 + 2;
+            int step = version == 32 ? 26 : (version * 4 + na * 2 + 1) / (na * 2 - 2) * 2;
+            int[] r = new int[na];
+            r[0] = 6;
+            for (int i = na - 1, p = Size - 7; i >= 1; i--, p -= step) r[i] = p;
+            return r;
+        }
+
+        void DrawFormatBits(int mask)
+        {
+            int data = FORMAT_ECL[ecl] << 3 | mask;
+            int rem = data;
+            for (int i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+            int bits = (data << 10 | rem) ^ 0x5412;
+            for (int i = 0; i <= 5; i++) SetFunc(8, i, Bit(bits, i));
+            SetFunc(8, 7, Bit(bits, 6));
+            SetFunc(8, 8, Bit(bits, 7));
+            SetFunc(7, 8, Bit(bits, 8));
+            for (int i = 9; i < 15; i++) SetFunc(14 - i, 8, Bit(bits, i));
+            for (int i = 0; i < 8; i++) SetFunc(Size - 1 - i, 8, Bit(bits, i));
+            for (int i = 8; i < 15; i++) SetFunc(8, Size - 15 + i, Bit(bits, i));
+            SetFunc(8, Size - 8, true);
+        }
+
+        static bool Bit(int x, int i) { return ((x >> i) & 1) != 0; }
+
+        void DrawCodewords(byte[] data)
+        {
+            int i = 0;
+            for (int right = Size - 1; right >= 1; right -= 2)
+            {
+                if (right == 6) right = 5;
+                for (int vert = 0; vert < Size; vert++)
+                    for (int j = 0; j < 2; j++)
+                    {
+                        int x = right - j;
+                        bool upward = ((right + 1) & 2) == 0;
+                        int y = upward ? Size - 1 - vert : vert;
+                        if (!isFunc[y, x] && i < data.Length * 8)
+                        {
+                            Dark[y, x] = ((data[i >> 3] >> (7 - (i & 7))) & 1) != 0;
+                            i++;
+                        }
+                    }
+            }
+        }
+
+        void ApplyMask(int m)
+        {
+            for (int y = 0; y < Size; y++)
+                for (int x = 0; x < Size; x++)
+                {
+                    if (isFunc[y, x]) continue;
+                    bool inv;
+                    switch (m)
+                    {
+                        case 0: inv = (x + y) % 2 == 0; break;
+                        case 1: inv = y % 2 == 0; break;
+                        case 2: inv = x % 3 == 0; break;
+                        case 3: inv = (x + y) % 3 == 0; break;
+                        case 4: inv = (x / 3 + y / 2) % 2 == 0; break;
+                        case 5: inv = x * y % 2 + x * y % 3 == 0; break;
+                        case 6: inv = (x * y % 2 + x * y % 3) % 2 == 0; break;
+                        default: inv = ((x + y) % 2 + x * y % 3) % 2 == 0; break;
+                    }
+                    if (inv) Dark[y, x] = !Dark[y, x];
+                }
+        }
+
+        // 간단한 점수 (같은 색 줄, 2x2 덩어리, 흑백 비율)
+        int Penalty()
+        {
+            int score = 0;
+            for (int y = 0; y < Size; y++)
+            {
+                int run = 1, runC = 1;
+                for (int x = 1; x < Size; x++)
+                {
+                    if (Dark[y, x] == Dark[y, x - 1]) { run++; if (run == 5) score += 3; else if (run > 5) score++; }
+                    else run = 1;
+                    if (Dark[x, y] == Dark[x - 1, y]) { runC++; if (runC == 5) score += 3; else if (runC > 5) score++; }
+                    else runC = 1;
+                }
+            }
+            int darkCount = 0;
+            for (int y = 0; y < Size; y++)
+                for (int x = 0; x < Size; x++)
+                {
+                    if (Dark[y, x]) darkCount++;
+                    if (x < Size - 1 && y < Size - 1)
+                    {
+                        bool c = Dark[y, x];
+                        if (c == Dark[y, x + 1] && c == Dark[y + 1, x] && c == Dark[y + 1, x + 1]) score += 3;
+                    }
+                }
+            int total = Size * Size;
+            int k = (Math.Abs(darkCount * 20 - total * 10) + total - 1) / total - 1;
+            score += Math.Max(0, k) * 10;
+            return score;
+        }
+
+        // 그림으로 (흰 여백 4칸 포함)
+        public Bitmap ToBitmap(int scale)
+        {
+            int border = 4;
+            int n = (Size + border * 2) * scale;
+            Bitmap b = new Bitmap(n, n);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.White);
+                for (int y = 0; y < Size; y++)
+                    for (int x = 0; x < Size; x++)
+                        if (Dark[y, x]) g.FillRectangle(Brushes.Black, (x + border) * scale, (y + border) * scale, scale, scale);
+            }
+            return b;
+        }
+    }
+
+    // ================= 페이지를 QR 로 보기 =================
+
+    public class QrForm : Form
+    {
+        string title, text;
+        List<string> parts = new List<string>();
+        int index = 0;
+        Panel view;
+        Label pageLabel, infoLabel;
+        Button prevBtn, nextBtn;
+        ComboBox sizeBox;
+        Bitmap qrBmp;
+        float S;
+        static readonly int[] LIMIT = { 500, 1000, 2000 };   // QR 한 장에 담을 바이트
+
+        int Px(int v) { return (int)(v * S); }
+
+        public QrForm(string pageTitle, string pageText, float scale)
+        {
+            title = pageTitle;
+            text = pageText.Replace("\r\n", "\n").TrimEnd();
+            S = scale;
+            Text = "QR로 보기 - " + pageTitle;
+            Font = new Font("Malgun Gothic", 9f);
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            KeyPreview = true;
+            ClientSize = new Size(Px(520), Px(640));
+            MinimumSize = new Size(Px(360), Px(460));
+
+            view = new Panel();
+            view.Dock = DockStyle.Fill;
+            view.BackColor = Color.White;
+            view.Paint += new PaintEventHandler(View_Paint);
+            view.Resize += new EventHandler(View_Resize);
+
+            Panel bottom = new Panel();
+            bottom.Dock = DockStyle.Bottom;
+            bottom.Height = Px(92);
+            bottom.Padding = new Padding(Px(10), Px(6), Px(10), Px(6));
+
+            prevBtn = new Button();
+            prevBtn.Text = "◀ 이전";
+            prevBtn.SetBounds(Px(10), Px(8), Px(80), Px(30));
+            prevBtn.Click += new EventHandler(Prev_Click);
+            pageLabel = new Label();
+            pageLabel.TextAlign = ContentAlignment.MiddleCenter;
+            pageLabel.Font = new Font("Malgun Gothic", 11f, FontStyle.Bold);
+            pageLabel.SetBounds(Px(96), Px(8), Px(110), Px(30));
+            nextBtn = new Button();
+            nextBtn.Text = "다음 ▶";
+            nextBtn.SetBounds(Px(212), Px(8), Px(80), Px(30));
+            nextBtn.Click += new EventHandler(Next_Click);
+            Label sl = new Label();
+            sl.Text = "한 장에";
+            sl.TextAlign = ContentAlignment.MiddleRight;
+            sl.SetBounds(Px(300), Px(8), Px(56), Px(30));
+            sizeBox = new ComboBox();
+            sizeBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            sizeBox.Items.AddRange(new string[] { "적게 (잘 찍힘)", "보통", "많이 (촘촘함)" });
+            sizeBox.SelectedIndex = 1;
+            sizeBox.SetBounds(Px(360), Px(11), Px(140), Px(24));
+            sizeBox.SelectedIndexChanged += new EventHandler(Size_Changed);
+            infoLabel = new Label();
+            infoLabel.ForeColor = Color.Gray;
+            infoLabel.SetBounds(Px(10), Px(44), Px(490), Px(40));
+
+            bottom.Controls.Add(prevBtn);
+            bottom.Controls.Add(pageLabel);
+            bottom.Controls.Add(nextBtn);
+            bottom.Controls.Add(sl);
+            bottom.Controls.Add(sizeBox);
+            bottom.Controls.Add(infoLabel);
+            Controls.Add(view);
+            Controls.Add(bottom);
+            Skin.Apply(this);
+            view.BackColor = Color.White;   // QR 은 항상 흰 바탕
+            Split();
+            Show(0);
+        }
+
+        // 글을 QR 여러 장으로 나누기 (가능하면 줄 끝에서)
+        void Split()
+        {
+            parts.Clear();
+            int limit = LIMIT[sizeBox.SelectedIndex];
+            string body = title + "\n\n" + text;
+            Encoding u = Encoding.UTF8;
+            int pos = 0;
+            while (pos < body.Length)
+            {
+                int lo = pos, hi = body.Length, fit = pos;
+                // 들어가는 가장 긴 길이 (앞 번호 자리 20바이트 빼고)
+                while (lo <= hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    if (u.GetByteCount(body.Substring(pos, mid - pos)) <= limit - 20) { fit = mid; lo = mid + 1; }
+                    else hi = mid - 1;
+                }
+                if (fit <= pos) fit = Math.Min(body.Length, pos + 1);
+                int end = fit;
+                if (end < body.Length)
+                {
+                    int nl = body.LastIndexOf('\n', end - 1, end - pos);
+                    int sp = body.LastIndexOf(' ', end - 1, end - pos);
+                    if (nl > pos + (end - pos) / 2) end = nl + 1;          // 줄 끝에서 자르기
+                    else if (sp > pos + (end - pos) * 3 / 4) end = sp + 1; // 없으면 띄어쓰기에서
+                    else if (char.IsLowSurrogate(body[end])) end--;
+                }
+                parts.Add(body.Substring(pos, end - pos));
+                pos = end;
+            }
+            if (parts.Count == 0) parts.Add(title);
+            if (parts.Count > 1)
+                for (int i = 0; i < parts.Count; i++) parts[i] = "(" + (i + 1) + "/" + parts.Count + ") " + parts[i];
+        }
+
+        void Show(int i)
+        {
+            index = Math.Max(0, Math.Min(parts.Count - 1, i));
+            if (qrBmp != null) { qrBmp.Dispose(); qrBmp = null; }
+            try
+            {
+                QrCode q = QrCode.Encode(Encoding.UTF8.GetBytes(parts[index]));
+                qrBmp = q.ToBitmap(1);
+                infoLabel.Text = "폰 카메라나 QR 앱으로 찍으세요. 서식은 빠지고 글자만 담깁니다.\n이 장: " + parts[index].Length + "자" + (parts.Count > 1 ? "   ← → 키로 넘기기" : "");
+            }
+            catch (Exception ex) { infoLabel.Text = ex.Message; }
+            pageLabel.Text = (index + 1) + " / " + parts.Count;
+            prevBtn.Enabled = index > 0;
+            nextBtn.Enabled = index < parts.Count - 1;
+            view.Invalidate();
+        }
+
+        void View_Paint(object sender, PaintEventArgs e)
+        {
+            if (qrBmp == null) return;
+            int avail = Math.Min(view.ClientSize.Width, view.ClientSize.Height) - Px(20);
+            int scale = Math.Max(1, avail / qrBmp.Width);
+            int w = qrBmp.Width * scale;
+            int x = (view.ClientSize.Width - w) / 2, y = (view.ClientSize.Height - w) / 2;
+            e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            e.Graphics.DrawImage(qrBmp, new Rectangle(x, y, w, w));
+        }
+
+        void View_Resize(object sender, EventArgs e) { view.Invalidate(); }
+        void Prev_Click(object sender, EventArgs e) { Show(index - 1); }
+        void Next_Click(object sender, EventArgs e) { Show(index + 1); }
+
+        void Size_Changed(object sender, EventArgs e)
+        {
+            Split();
+            Show(0);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape) { Close(); return true; }
+            if (keyData == Keys.Left || keyData == Keys.PageUp) { Show(index - 1); return true; }
+            if (keyData == Keys.Right || keyData == Keys.PageDown) { Show(index + 1); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (qrBmp != null) qrBmp.Dispose();
+            base.OnFormClosed(e);
+        }
     }
 
     // ================= 찾기 / 바꾸기 창 =================
