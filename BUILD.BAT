@@ -39,6 +39,8 @@ if errorlevel 1 (
 )
 
 :ok
+rem The icon is inside AHNNOTE.exe now, so the temporary icon file is not needed
+if exist AHNNOTE.ico del AHNNOTE.ico
 echo.
 echo [OK] AHNNOTE.exe created.
 echo Notes are saved in the AhnNoteData folder next to AHNNOTE.exe
