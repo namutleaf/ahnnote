@@ -160,8 +160,6 @@ namespace AhnNote
         Dictionary<string, string> pgBg = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         Font baseFont;
         Font favSmallFont = new Font("Malgun Gothic", 8f);
-        Color lastFore = Color.FromArgb(224, 62, 62);
-        Color lastHi = Color.FromArgb(255, 241, 118);
         bool dirty { get { return ed.Dirty; } set { ed.Dirty = value; } }
         bool loading { get { return ed.Loading; } set { ed.Loading = value; } }
         bool listBusy = false;
@@ -413,24 +411,19 @@ namespace AhnNote
             tool.Items.Add(headBtn);
             tool.Items.Add(new ToolStripSeparator());
 
-            Color[] fc = { Color.Black, Color.FromArgb(224, 62, 62), Color.FromArgb(217, 115, 13), Color.FromArgb(203, 145, 47),
-                           Color.FromArgb(15, 123, 108), Color.FromArgb(11, 107, 203), Color.FromArgb(105, 64, 165), Color.FromArgb(155, 154, 151) };
-            string[] fn = { "기본", "빨강", "주황", "노랑", "초록", "파랑", "보라", "회색" };
             foreBtn = new ToolStripSplitButton("글자색");
-            foreBtn.Image = MakeSwatch(lastFore);
-            foreBtn.ToolTipText = "글자색";
+            foreBtn.Image = MakeSwatch(NoteEditor.RecentFore);
+            foreBtn.ToolTipText = "글자색 (Ctrl+Shift+C: 최근 색)";
             foreBtn.ButtonClick += new EventHandler(ForeBtn_Click);
-            AddColorItems(foreBtn, fc, fn, new EventHandler(ForePick_Click), true);
+            AddColorItems(foreBtn, NoteEditor.FORE_COLORS, NoteEditor.FORE_NAMES, new EventHandler(ForePick_Click), true);
             tool.Items.Add(foreBtn);
 
-            Color[] hc = { Color.FromArgb(255, 241, 118), Color.FromArgb(197, 225, 165), Color.FromArgb(179, 229, 252),
-                           Color.FromArgb(248, 187, 208), Color.FromArgb(255, 204, 128), Color.FromArgb(225, 190, 231), Color.FromArgb(224, 224, 224) };
-            string[] hn = { "노랑", "연두", "하늘", "분홍", "주황", "보라", "회색" };
             hiBtn = new ToolStripSplitButton("형광펜");
-            hiBtn.Image = MakeSwatch(lastHi);
-            hiBtn.ToolTipText = "형광펜 (음영)";
+            hiBtn.Image = MakeSwatch(NoteEditor.RecentHi);
+            hiBtn.ToolTipText = "형광펜 (Ctrl+Shift+H: 최근 색)";
             hiBtn.ButtonClick += new EventHandler(HiBtn_Click);
-            AddColorItems(hiBtn, hc, hn, new EventHandler(HiPick_Click), true);
+            AddColorItems(hiBtn, NoteEditor.HI_COLORS, NoteEditor.HI_NAMES, new EventHandler(HiPick_Click), true);
+            NoteEditor.RecentChanged += new EventHandler(Recent_Changed);
             ToolStripMenuItem none = new ToolStripMenuItem("형광펜 없음");
             none.Tag = Color.Empty;
             none.Click += new EventHandler(HiPick_Click);
@@ -579,6 +572,7 @@ namespace AhnNote
             edMenu.Items.Add("텍스트만 붙여넣기 (Ctrl+Shift+V)", null, new EventHandler(PastePlain_Click));
             edMenu.Items.Add(new ToolStripSeparator());
             edMenu.Items.Add("모두 선택 (Ctrl+A)", null, new EventHandler(SelectAll_Click));
+            ed.AddColorMenus(edMenu);
             ed.ContextMenuStrip = edMenu;
         }
 
@@ -1308,6 +1302,15 @@ namespace AhnNote
                     if (k == "dark") dark = (v == "1");
                     else if (k == "top") topMost = (v == "1");
                     else if (k == "molebest") int.TryParse(v, out moleBest);
+                    else if (k == "fore" || k == "hi")
+                    {
+                        int argb;
+                        if (int.TryParse(v, out argb))
+                        {
+                            if (k == "fore") NoteEditor.RecentFore = Color.FromArgb(argb);
+                            else NoteEditor.RecentHi = Color.FromArgb(argb);
+                        }
+                    }
                 }
             }
             catch { }
@@ -1315,7 +1318,8 @@ namespace AhnNote
 
         void SaveSettings()
         {
-            string t = "dark=" + (dark ? "1" : "0") + "\r\n" + "top=" + (topMost ? "1" : "0") + "\r\n" + "molebest=" + moleBest + "\r\n";
+            string t = "dark=" + (dark ? "1" : "0") + "\r\n" + "top=" + (topMost ? "1" : "0") + "\r\n" + "molebest=" + moleBest + "\r\n"
+                + "fore=" + NoteEditor.RecentFore.ToArgb() + "\r\n" + "hi=" + NoteEditor.RecentHi.ToArgb() + "\r\n";
             try { File.WriteAllText(Path.Combine(dataDir, "_settings.txt"), t, Encoding.UTF8); }
             catch { }
         }
@@ -2135,6 +2139,7 @@ namespace AhnNote
             AddText("형광펜", BASE_SIZE, FontStyle.Regular, Color.Black, Color.FromArgb(255, 241, 118));
             AddText(" / 배경 : 위 도구 모음에서 선택\n", BASE_SIZE, FontStyle.Regular, Color.Black, none);
             AddLine("Ctrl+Alt+1~3  제목 1~3,  Ctrl+Alt+0  본문,  Ctrl+Shift+> <  글자 크기");
+            AddLine("Ctrl+Shift+C  최근 글자색,  Ctrl+Shift+H  최근 형광펜 (한 번 더 누르면 원래대로),  우클릭 메뉴에서 색 고르기");
             AddLine("");
             AddText("기본 단축키\n", 16f, FontStyle.Bold, Color.Black, none);
             AddLine("Ctrl+F 찾기,  Ctrl+H 바꾸기,  F3 다음 찾기");
@@ -2226,27 +2231,30 @@ namespace AhnNote
 
         void ForeBtn_Click(object sender, EventArgs e)
         {
-            if (ed.ReadOnly) return;
-            ed.SelectionColor = ColorMap.Disp(lastFore);
-            ed.MarkDirty();
+            ed.ApplyFore(NoteEditor.RecentFore, false);
             ed.Focus();
         }
 
         void ForePick_Click(object sender, EventArgs e)
         {
-            Color c = PickColor(((ToolStripItem)sender).Tag, lastFore);
+            Color c = PickColor(((ToolStripItem)sender).Tag, NoteEditor.RecentFore);
             if (c == Color.Transparent) return;
-            lastFore = c;
-            foreBtn.Image = MakeSwatch(c);
-            ForeBtn_Click(sender, e);
+            ed.ApplyFore(c, true);
+            ed.Focus();
         }
 
         void HiBtn_Click(object sender, EventArgs e)
         {
-            if (ed.ReadOnly) return;
-            ed.SelectionBackColor = ColorMap.Disp(lastHi);
-            ed.MarkDirty();
+            ed.ApplyHighlight(NoteEditor.RecentHi, false);
             ed.Focus();
+        }
+
+        // 최근 색이 바뀌면 도구 모음 색 표시와 설정 저장
+        void Recent_Changed(object sender, EventArgs e)
+        {
+            foreBtn.Image = MakeSwatch(NoteEditor.RecentFore);
+            hiBtn.Image = MakeSwatch(NoteEditor.RecentHi);
+            SaveSettings();
         }
 
         void HiPick_Click(object sender, EventArgs e)
@@ -2258,11 +2266,10 @@ namespace AhnNote
                 ed.Focus();
                 return;
             }
-            Color c = PickColor(tag, lastHi);
+            Color c = PickColor(tag, NoteEditor.RecentHi);
             if (c == Color.Transparent) return;
-            lastHi = c;
-            hiBtn.Image = MakeSwatch(c);
-            HiBtn_Click(sender, e);
+            ed.ApplyHighlight(c, true);
+            ed.Focus();
         }
 
         void BgPick_Click(object sender, EventArgs e)
@@ -2457,6 +2464,8 @@ namespace AhnNote
                 case Keys.Control | Keys.Shift | Keys.OemPeriod: ApplyFont(MODE_GROW, FontStyle.Regular, false, 1f); return true;
                 case Keys.Control | Keys.Shift | Keys.Oemcomma: ApplyFont(MODE_GROW, FontStyle.Regular, false, -1f); return true;
                 case Keys.Control | Keys.D0: ZoomFactor = 1f; return true;
+                case Keys.Control | Keys.Shift | Keys.C: ToggleRecentFore(); return true;
+                case Keys.Control | Keys.Shift | Keys.H: ToggleRecentHi(); return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -2667,6 +2676,141 @@ namespace AhnNote
                 on = f0 == null || (f0.Style & st) == 0;
             }
             ApplyFont(MODE_STYLE, st, on, 0f);
+            Focus();
+        }
+
+        // ---------- 글자색 / 형광펜 ----------
+
+        public static readonly Color[] FORE_COLORS = { Color.Black, Color.FromArgb(224, 62, 62), Color.FromArgb(217, 115, 13), Color.FromArgb(203, 145, 47),
+            Color.FromArgb(15, 123, 108), Color.FromArgb(11, 107, 203), Color.FromArgb(105, 64, 165), Color.FromArgb(155, 154, 151) };
+        public static readonly string[] FORE_NAMES = { "기본", "빨강", "주황", "노랑", "초록", "파랑", "보라", "회색" };
+        public static readonly Color[] HI_COLORS = { Color.FromArgb(255, 241, 118), Color.FromArgb(197, 225, 165), Color.FromArgb(179, 229, 252),
+            Color.FromArgb(248, 187, 208), Color.FromArgb(255, 204, 128), Color.FromArgb(225, 190, 231), Color.FromArgb(224, 224, 224) };
+        public static readonly string[] HI_NAMES = { "노랑", "연두", "하늘", "분홍", "주황", "보라", "회색" };
+
+        // 단축키로 칠할 색 (가장 최근에 고른 색, 처음엔 빨강 / 노랑)
+        public static Color RecentFore = Color.FromArgb(224, 62, 62);
+        public static Color RecentHi = Color.FromArgb(255, 241, 118);
+        public static event EventHandler RecentChanged;
+
+        static void SetRecent(bool fore, Color c)
+        {
+            if (fore) RecentFore = c; else RecentHi = c;
+            if (RecentChanged != null) RecentChanged(null, EventArgs.Empty);
+        }
+
+        // 색은 항상 라이트 기준 색으로 받음 (다크 모드면 화면용으로 바꿔서 칠함)
+        public void ApplyFore(Color light, bool remember)
+        {
+            if (ReadOnly) return;
+            if (remember && light.ToArgb() != Color.Black.ToArgb()) SetRecent(true, light);
+            SelectionColor = ColorMap.Disp(light);
+            MarkDirty();
+        }
+
+        public void ApplyHighlight(Color light, bool remember)
+        {
+            if (ReadOnly) return;
+            if (remember) SetRecent(false, light);
+            SelectionBackColor = ColorMap.Disp(light);
+            MarkDirty();
+        }
+
+        // Ctrl+Shift+C : 최근 글자색. 이미 그 색이면 기본색으로
+        public void ToggleRecentFore()
+        {
+            if (ReadOnly) return;
+            Color d = ColorMap.Disp(RecentFore);
+            if (SelectionLength > 0 && SelectionColor.ToArgb() == d.ToArgb()) SelectionColor = ColorMap.Disp(Color.Black);
+            else SelectionColor = d;
+            MarkDirty();
+        }
+
+        // Ctrl+Shift+H : 최근 형광펜. 이미 그 색이면 지우기
+        public void ToggleRecentHi()
+        {
+            if (ReadOnly) return;
+            Color d = ColorMap.Disp(RecentHi);
+            if (SelectionLength > 0 && SelectionBackColor.ToArgb() == d.ToArgb()) ClearHighlight();
+            else { SelectionBackColor = d; MarkDirty(); }
+        }
+
+        Bitmap Swatch(Color c)
+        {
+            int n = (int)(16 * UiScale);
+            Bitmap b = new Bitmap(n, n);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.Transparent);
+                using (SolidBrush br = new SolidBrush(c)) g.FillRectangle(br, 1, 1, n - 2, n - 2);
+                g.DrawRectangle(Pens.Gray, 1, 1, n - 3, n - 3);
+            }
+            return b;
+        }
+
+        ToolStripMenuItem foreMenu, hiMenu;
+
+        // 우클릭 메뉴에 글자색 / 형광펜 넣기
+        public void AddColorMenus(ContextMenuStrip m)
+        {
+            foreMenu = new ToolStripMenuItem("글자색 (Ctrl+Shift+C)");
+            for (int i = 0; i < FORE_COLORS.Length; i++)
+            {
+                ToolStripMenuItem mi = new ToolStripMenuItem(FORE_NAMES[i], Swatch(FORE_COLORS[i]), new EventHandler(MenuFore_Click));
+                mi.Tag = FORE_COLORS[i];
+                foreMenu.DropDownItems.Add(mi);
+            }
+            foreMenu.DropDownItems.Add(new ToolStripMenuItem("다른 색...", null, new EventHandler(MenuFore_Click)));
+            hiMenu = new ToolStripMenuItem("형광펜 (Ctrl+Shift+H)");
+            for (int i = 0; i < HI_COLORS.Length; i++)
+            {
+                ToolStripMenuItem mi = new ToolStripMenuItem(HI_NAMES[i], Swatch(HI_COLORS[i]), new EventHandler(MenuHi_Click));
+                mi.Tag = HI_COLORS[i];
+                hiMenu.DropDownItems.Add(mi);
+            }
+            hiMenu.DropDownItems.Add(new ToolStripMenuItem("다른 색...", null, new EventHandler(MenuHi_Click)));
+            ToolStripMenuItem none = new ToolStripMenuItem("형광펜 없음", null, new EventHandler(MenuHi_Click));
+            none.Tag = Color.Empty;
+            hiMenu.DropDownItems.Add(none);
+            m.Items.Insert(0, new ToolStripSeparator());
+            m.Items.Insert(0, hiMenu);
+            m.Items.Insert(0, foreMenu);
+            m.Opening += new System.ComponentModel.CancelEventHandler(ColorMenu_Opening);
+        }
+
+        void ColorMenu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            foreMenu.Enabled = !ReadOnly;
+            hiMenu.Enabled = !ReadOnly;
+        }
+
+        Color AskColor(Color current)
+        {
+            using (ColorDialog cd = new ColorDialog())
+            {
+                cd.FullOpen = true;
+                cd.Color = ColorMap.Disp(current);
+                if (cd.ShowDialog(FindForm()) != DialogResult.OK) return Color.Empty;
+                return ColorMap.Dark ? ColorMap.ToLight(cd.Color) : cd.Color;
+            }
+        }
+
+        void MenuFore_Click(object sender, EventArgs e)
+        {
+            object tag = ((ToolStripItem)sender).Tag;
+            Color c = tag is Color ? (Color)tag : AskColor(RecentFore);
+            if (c.IsEmpty) return;
+            ApplyFore(c, true);
+            Focus();
+        }
+
+        void MenuHi_Click(object sender, EventArgs e)
+        {
+            object tag = ((ToolStripItem)sender).Tag;
+            if (tag is Color && ((Color)tag).IsEmpty) { ClearHighlight(); Focus(); return; }
+            Color c = tag is Color ? (Color)tag : AskColor(RecentHi);
+            if (c.IsEmpty) return;
+            ApplyHighlight(c, true);
             Focus();
         }
 
@@ -3226,6 +3370,7 @@ namespace AhnNote
             m.Items.Add("텍스트만 붙여넣기 (Ctrl+Shift+V)", null, new EventHandler(PastePlain_Click));
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add("모두 선택 (Ctrl+A)", null, new EventHandler(SelectAll_Click));
+            Ed.AddColorMenus(m);
             Ed.ContextMenuStrip = m;
 
             Controls.Add(inner);
