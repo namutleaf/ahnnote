@@ -150,6 +150,7 @@ namespace AhnNote
         ContextMenuStrip nbMenu, pgMenu, edMenu;
         ToolStripMenuItem moveToMenu, favMenuItem, stickyMenuItem;
         Timer saveTimer;
+        Timer quickTimer;   // 마지막으로 입력한 뒤 0.6초 지나면 저장
         FindForm findForm;
 
         // ---------- 데이터 ----------
@@ -256,6 +257,10 @@ namespace AhnNote
             ed.Dock = DockStyle.Fill;
             ed.SelectionChanged += new EventHandler(Ed_SelectionChanged);
             ed.FormatChanged += new EventHandler(Ed_FormatChanged);
+            ed.UserChanged += new EventHandler(Ed_UserChanged);
+            quickTimer = new Timer();
+            quickTimer.Interval = 600;
+            quickTimer.Tick += new EventHandler(QuickTimer_Tick);
 
             titleBox = new TextBox();
             titleBox.Dock = DockStyle.Top;
@@ -669,6 +674,23 @@ namespace AhnNote
         {
             if (dirty) SaveCurrent();
             UpdateStatus();
+        }
+
+        // 입력할 때마다 저장 시계를 다시 시작 → 잠깐 멈추면 바로 저장
+        void Ed_UserChanged(object sender, EventArgs e)
+        {
+            quickTimer.Stop();
+            quickTimer.Start();
+        }
+
+        void QuickTimer_Tick(object sender, EventArgs e)
+        {
+            quickTimer.Stop();
+            if (dirty && !loading)
+            {
+                SaveCurrent();
+                UpdateStatus();
+            }
         }
 
         // ================= 단축키 =================
@@ -2624,9 +2646,13 @@ namespace AhnNote
             catch { return null; }
         }
 
+        public event EventHandler UserChanged;   // 글을 바꿀 때마다 (저장 예약용)
+
         public void MarkDirty()
         {
-            if (!Loading) Dirty = true;
+            if (Loading) return;
+            Dirty = true;
+            if (UserChanged != null) UserChanged(this, EventArgs.Empty);
         }
 
         Font MakeFont(Font f, int mode, FontStyle st, bool on, float val)
@@ -3352,6 +3378,7 @@ namespace AhnNote
             Color.FromArgb(215, 240, 190), Color.FromArgb(230, 215, 250), Color.FromArgb(255, 220, 180), Color.FromArgb(232, 232, 232), Color.White };
         static readonly string[] NOTE_NAMES = { "노랑", "분홍", "하늘", "연두", "보라", "주황", "회색", "흰색" };
         Timer saveTimer;
+        Timer quickTimer;   // 마지막으로 입력한 뒤 0.6초 지나면 저장
         ToolTip tip;
         float S;
         bool mdl;   // 윈도우 아이콘 글꼴이 있으면 아이콘, 없으면 글자
@@ -3444,6 +3471,10 @@ namespace AhnNote
             Ed.LoadPage(path);
             ApplyColors();
             SetPinned(false);
+            quickTimer = new Timer();
+            quickTimer.Interval = 600;
+            quickTimer.Tick += new EventHandler(QuickTimer_Tick);
+            Ed.UserChanged += new EventHandler(Ed_UserChanged);
 
             saveTimer = new Timer();
             saveTimer.Interval = 3000;
@@ -3556,6 +3587,18 @@ namespace AhnNote
 
         void SaveTimer_Tick(object sender, EventArgs e) { SaveNow(); }
 
+        void Ed_UserChanged(object sender, EventArgs e)
+        {
+            quickTimer.Stop();
+            quickTimer.Start();
+        }
+
+        void QuickTimer_Tick(object sender, EventArgs e)
+        {
+            quickTimer.Stop();
+            SaveNow();
+        }
+
         void Pin_Click(object sender, EventArgs e)
         {
             SetPinned(!Pinned);
@@ -3646,6 +3689,7 @@ namespace AhnNote
         {
             SaveNow();
             saveTimer.Stop();
+            quickTimer.Stop();
             base.OnFormClosing(e);
         }
 
