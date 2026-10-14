@@ -92,6 +92,7 @@ namespace AhnNote
         Label logo;
         Panel titleLine;
         ToolStripButton darkBtn, topBtn;
+        ToolStripDropDownButton snipBtn;
         bool topMost = false;
         int moleBest = 0;
         Dictionary<string, string> nbColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -176,6 +177,8 @@ namespace AhnNote
             LoadSettings();
             cal = new CalData(dataDir);
             cal.Load();
+            Snippets.FilePath = Path.Combine(dataDir, "_snippets.txt");
+            Snippets.Load();
             baseFont = new Font(FONT_NAME, BASE_SIZE);
             Text = "AHNNOTE";
             Font = new Font(FONT_NAME, 9f);
@@ -442,6 +445,9 @@ namespace AhnNote
 
             AddBtn("□ 할일", "할 일 체크박스 (Ctrl+1)  /  [] 입력", new EventHandler(Todo_Click));
             AddBtn("• 목록", "글머리 기호 (Ctrl+.)  /  줄 처음에 - 입력 후 스페이스", new EventHandler(Bullet_Click));
+            snipBtn = new ToolStripDropDownButton("상용구");
+            snipBtn.ToolTipText = "자주 쓰는 문구 넣기 (Alt+1~9)";
+            tool.Items.Add(snipBtn);
             tool.Items.Add(new ToolStripSeparator());
             AddBtn("찾기", "찾기 (Ctrl+F) / 바꾸기 (Ctrl+H)", new EventHandler(Find_Click));
 
@@ -573,6 +579,9 @@ namespace AhnNote
             edMenu.Items.Add(new ToolStripSeparator());
             edMenu.Items.Add("모두 선택 (Ctrl+A)", null, new EventHandler(SelectAll_Click));
             ed.AddColorMenus(edMenu);
+            SnippetMenu sm = new SnippetMenu(ed, baseFont, S);
+            sm.Attach(edMenu);
+            sm.AttachButton(snipBtn);
             ed.ContextMenuStrip = edMenu;
         }
 
@@ -2139,6 +2148,7 @@ namespace AhnNote
             AddText("형광펜", BASE_SIZE, FontStyle.Regular, Color.Black, Color.FromArgb(255, 241, 118));
             AddText(" / 배경 : 위 도구 모음에서 선택\n", BASE_SIZE, FontStyle.Regular, Color.Black, none);
             AddLine("Ctrl+Alt+1~3  제목 1~3,  Ctrl+Alt+0  본문,  Ctrl+Shift+> <  글자 크기");
+            AddLine("Alt+1~9  상용구 넣기 (블록 잡고 우클릭 → 선택한 글을 상용구로 저장)");
             AddLine("Ctrl+Shift+C  최근 글자색,  Ctrl+Shift+H  최근 형광펜 (한 번 더 누르면 원래대로),  우클릭 메뉴에서 색 고르기");
             AddLine("");
             AddText("기본 단축키\n", 16f, FontStyle.Bold, Color.Black, none);
@@ -2466,6 +2476,17 @@ namespace AhnNote
                 case Keys.Control | Keys.D0: ZoomFactor = 1f; return true;
                 case Keys.Control | Keys.Shift | Keys.C: ToggleRecentFore(); return true;
                 case Keys.Control | Keys.Shift | Keys.H: ToggleRecentHi(); return true;
+            }
+            // Alt+1~9 : 상용구 넣기
+            if ((keyData & Keys.Modifiers) == Keys.Alt)
+            {
+                Keys k = keyData & Keys.KeyCode;
+                if (k >= Keys.D1 && k <= Keys.D9)
+                {
+                    Snippet sn = Snippets.ByKey(k - Keys.D0);
+                    if (sn != null) Snippets.Insert(this, sn);
+                    return true;
+                }
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -3371,6 +3392,7 @@ namespace AhnNote
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add("모두 선택 (Ctrl+A)", null, new EventHandler(SelectAll_Click));
             Ed.AddColorMenus(m);
+            new SnippetMenu(Ed, baseFont, scale).Attach(m);
             Ed.ContextMenuStrip = m;
 
             Controls.Add(inner);
@@ -4027,6 +4049,483 @@ namespace AhnNote
         {
             if (qrBmp != null) qrBmp.Dispose();
             base.OnFormClosed(e);
+        }
+    }
+
+    // ================= 상용구 (자주 쓰는 문구, 서식 포함) =================
+
+    public class Snippet
+    {
+        public string Name = "";
+        public int Key = 0;        // Alt+1~9, 0 이면 없음
+        public string Rtf = "";    // 라이트 기준 색으로 저장
+        public override string ToString() { return Name; }
+    }
+
+    public static class Snippets
+    {
+        public static List<Snippet> Items = new List<Snippet>();
+        public static string FilePath;
+        public static event EventHandler Changed;
+
+        public static void Load()
+        {
+            Items.Clear();
+            try
+            {
+                if (FilePath == null || !File.Exists(FilePath)) return;
+                foreach (string line in File.ReadAllLines(FilePath, Encoding.UTF8))
+                {
+                    string[] p = line.Split('\t');
+                    if (p.Length < 3) continue;
+                    Snippet s = new Snippet();
+                    s.Name = p[0];
+                    int.TryParse(p[1], out s.Key);
+                    try { s.Rtf = Encoding.UTF8.GetString(Convert.FromBase64String(p[2])); } catch { continue; }
+                    Items.Add(s);
+                }
+            }
+            catch { }
+        }
+
+        public static void Save()
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (Snippet s in Items)
+                sb.Append(s.Name.Replace("\t", " ")).Append('\t').Append(s.Key).Append('\t')
+                  .Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(s.Rtf))).Append("\r\n");
+            try { File.WriteAllText(FilePath, sb.ToString(), Encoding.UTF8); } catch { }
+            if (Changed != null) Changed(null, EventArgs.Empty);
+        }
+
+        public static Snippet ByKey(int key)
+        {
+            foreach (Snippet s in Items) if (s.Key == key) return s;
+            return null;
+        }
+
+        public static int FreeKey()
+        {
+            for (int k = 1; k <= 9; k++) if (ByKey(k) == null) return k;
+            return 0;
+        }
+
+        // 다른 상용구가 쓰던 번호면 빼앗기
+        public static void SetKey(Snippet s, int key)
+        {
+            if (key > 0) foreach (Snippet o in Items) if (o != s && o.Key == key) o.Key = 0;
+            s.Key = key;
+        }
+
+        public static string Label(Snippet s)
+        {
+            return s.Name + (s.Key > 0 ? "\t(Alt+" + s.Key + ")" : "");
+        }
+
+        // RTF 끝의 줄바꿈 하나 빼기 (넣을 때 빈 줄이 생기지 않게)
+        public static string TrimLastPar(string rtf)
+        {
+            int end = rtf.LastIndexOf('}');
+            if (end < 0) return rtf;
+            int p = rtf.LastIndexOf("\\par", end);
+            if (p < 0) return rtf;
+            if (rtf.Substring(p + 4, end - p - 4).Trim().Length != 0) return rtf;
+            return rtf.Substring(0, p) + rtf.Substring(p + 4);
+        }
+
+        // 편집기에서 선택한 부분을 상용구 RTF 로 (라이트 기준 색)
+        public static string FromSelection(NoteEditor ed)
+        {
+            string rtf = ed.SelectedRtf;
+            if (!ed.SelectedText.EndsWith("\n")) rtf = TrimLastPar(rtf);
+            if (ColorMap.Dark) rtf = ColorMap.MapColorTable(rtf, false);
+            return rtf;
+        }
+
+        public static void Insert(NoteEditor ed, Snippet s)
+        {
+            if (ed == null || s == null || ed.ReadOnly) return;
+            string rtf = ColorMap.Dark ? ColorMap.MapColorTable(s.Rtf, true) : s.Rtf;
+            int s0 = ed.SelectionStart;
+            int rest = ed.TextLength - ed.SelectionLength;
+            try { ed.SelectedRtf = rtf; }
+            catch { return; }
+            int s1 = s0 + Math.Max(0, ed.TextLength - rest);   // 넣은 글 바로 뒤
+            ed.Select(s1, 0);
+            if (ColorMap.Dark && s1 > s0) ed.FixTextColors(s0, s1, true, s1);
+            ed.MarkDirty();
+            ed.Focus();
+        }
+
+        public static void SaveSelection(NoteEditor ed)
+        {
+            Form owner = ed.FindForm();
+            if (ed.SelectionLength == 0)
+            {
+                MessageBox.Show(owner, "상용구로 저장할 글을 먼저 선택(블록 설정)하세요.", "AHNNOTE");
+                return;
+            }
+            string first = ed.SelectedText.Trim().Replace("\n", " ");
+            if (first.Length > 20) first = first.Substring(0, 20);
+            string name = InputDialog.Ask(owner, "상용구로 저장", "상용구 이름:", first);
+            if (name == null) return;
+            name = name.Trim();
+            if (name.Length == 0) return;
+            Snippet sn = new Snippet();
+            sn.Name = name;
+            sn.Rtf = FromSelection(ed);
+            sn.Key = FreeKey();
+            Items.Add(sn);
+            Save();
+            MessageBox.Show(owner, "'" + name + "' 상용구를 저장했습니다." + (sn.Key > 0 ? "\nAlt+" + sn.Key + " 로 넣을 수 있습니다." : "\n(Alt+1~9 가 모두 쓰이고 있어 단축키는 없습니다)"), "AHNNOTE");
+        }
+
+        public static void ShowManager(Form owner, Font baseFont, float scale)
+        {
+            using (SnippetForm f = new SnippetForm(baseFont, scale))
+            {
+                f.TopMost = owner.TopMost;
+                f.ShowDialog(owner);
+            }
+        }
+    }
+
+    // 우클릭 메뉴 / 도구 모음에 상용구 항목 넣기
+    public class SnippetMenu
+    {
+        NoteEditor ed;
+        ToolStripMenuItem insertMenu;
+        Form owner;
+        Font baseFont;
+        float scale;
+
+        public SnippetMenu(NoteEditor editor, Font font, float s)
+        {
+            ed = editor;
+            baseFont = font;
+            scale = s;
+        }
+
+        // 우클릭 메뉴용
+        public void Attach(ContextMenuStrip m)
+        {
+            insertMenu = new ToolStripMenuItem("상용구 넣기");
+            ToolStripMenuItem save = new ToolStripMenuItem("선택한 글을 상용구로 저장", null, new EventHandler(Save_Click));
+            int at = 3;   // 글자색, 형광펜, 구분선 다음
+            if (m.Items.Count < at) at = m.Items.Count;
+            m.Items.Insert(at, new ToolStripSeparator());
+            m.Items.Insert(at, save);
+            m.Items.Insert(at, insertMenu);
+            m.Opening += new System.ComponentModel.CancelEventHandler(Menu_Opening);
+        }
+
+        // 도구 모음 버튼용
+        public void AttachButton(ToolStripDropDownButton b)
+        {
+            b.DropDownOpening += new EventHandler(Button_Opening);
+            b.DropDownItems.Add("(비어 있음)");
+        }
+
+        void Fill(ToolStripItemCollection items, bool withTools)
+        {
+            items.Clear();
+            foreach (Snippet s in Snippets.Items)
+            {
+                ToolStripMenuItem mi = new ToolStripMenuItem(s.Name);
+                if (s.Key > 0) mi.ShortcutKeyDisplayString = "Alt+" + s.Key;
+                mi.Tag = s;
+                mi.Click += new EventHandler(Insert_Click);
+                mi.Enabled = !ed.ReadOnly;
+                items.Add(mi);
+            }
+            if (Snippets.Items.Count == 0)
+            {
+                ToolStripMenuItem empty = new ToolStripMenuItem("저장된 상용구가 없습니다");
+                empty.Enabled = false;
+                items.Add(empty);
+            }
+            if (withTools)
+            {
+                items.Add(new ToolStripSeparator());
+                items.Add(new ToolStripMenuItem("선택한 글을 상용구로 저장", null, new EventHandler(Save_Click)));
+            }
+            items.Add(new ToolStripMenuItem("상용구 관리...", null, new EventHandler(Manage_Click)));
+        }
+
+        void Menu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            Fill(insertMenu.DropDownItems, false);
+        }
+
+        void Button_Opening(object sender, EventArgs e)
+        {
+            Fill(((ToolStripDropDownButton)sender).DropDownItems, true);
+        }
+
+        void Insert_Click(object sender, EventArgs e)
+        {
+            Snippets.Insert(ed, (Snippet)((ToolStripItem)sender).Tag);
+        }
+
+        void Save_Click(object sender, EventArgs e) { Snippets.SaveSelection(ed); }
+
+        void Manage_Click(object sender, EventArgs e)
+        {
+            owner = ed.FindForm();
+            Snippets.ShowManager(owner, baseFont, scale);
+        }
+    }
+
+    // ================= 상용구 관리 창 =================
+
+    public class SnippetForm : Form
+    {
+        ListBox list;
+        TextBox nameBox;
+        ComboBox keyBox;
+        NoteEditor content;
+        Button newBtn, saveBtn, delBtn, upBtn, downBtn;
+        Snippet editing;
+        float S;
+
+        int Px(int v) { return (int)(v * S); }
+
+        public SnippetForm(Font baseFont, float scale)
+        {
+            S = scale;
+            Text = "상용구 관리";
+            Font = new Font("Malgun Gothic", 9f);
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(Px(700), Px(440));
+            MinimumSize = new Size(Px(560), Px(360));
+
+            Panel left = new Panel();
+            left.Dock = DockStyle.Left;
+            left.Width = Px(220);
+            left.Padding = new Padding(Px(10), Px(10), Px(6), Px(10));
+            list = new ListBox();
+            list.Dock = DockStyle.Fill;
+            list.IntegralHeight = false;
+            list.SelectedIndexChanged += new EventHandler(List_Selected);
+            FlowLayoutPanel lb = new FlowLayoutPanel();
+            lb.Dock = DockStyle.Bottom;
+            lb.Height = Px(38);
+            lb.Padding = new Padding(0, Px(4), 0, 0);
+            newBtn = SmallButton("새로 만들기", 90);
+            upBtn = SmallButton("▲", 36);
+            downBtn = SmallButton("▼", 36);
+            newBtn.Click += new EventHandler(New_Click);
+            upBtn.Click += new EventHandler(Up_Click);
+            downBtn.Click += new EventHandler(Down_Click);
+            lb.Controls.Add(newBtn);
+            lb.Controls.Add(upBtn);
+            lb.Controls.Add(downBtn);
+            left.Controls.Add(list);
+            left.Controls.Add(lb);
+
+            Panel right = new Panel();
+            right.Dock = DockStyle.Fill;
+            right.Padding = new Padding(Px(6), Px(10), Px(10), Px(10));
+            TableLayoutPanel top = new TableLayoutPanel();
+            top.Dock = DockStyle.Top;
+            top.Height = Px(34);
+            top.ColumnCount = 4;
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(44)));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(56)));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Px(96)));
+            Label nl = new Label();
+            nl.Text = "이름";
+            nl.TextAlign = ContentAlignment.MiddleLeft;
+            nl.Dock = DockStyle.Fill;
+            nameBox = new TextBox();
+            nameBox.Dock = DockStyle.Fill;
+            Label kl = new Label();
+            kl.Text = "단축키";
+            kl.TextAlign = ContentAlignment.MiddleRight;
+            kl.Dock = DockStyle.Fill;
+            keyBox = new ComboBox();
+            keyBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            keyBox.Dock = DockStyle.Fill;
+            keyBox.Items.Add("없음");
+            for (int k = 1; k <= 9; k++) keyBox.Items.Add("Alt+" + k);
+            top.Controls.Add(nl, 0, 0);
+            top.Controls.Add(nameBox, 1, 0);
+            top.Controls.Add(kl, 2, 0);
+            top.Controls.Add(keyBox, 3, 0);
+
+            Label hint = new Label();
+            hint.Dock = DockStyle.Top;
+            hint.Height = Px(26);
+            hint.TextAlign = ContentAlignment.BottomLeft;
+            hint.ForeColor = Color.Gray;
+            hint.Text = "내용 (Ctrl+B, Ctrl+Shift+C 등 서식 단축키를 그대로 쓸 수 있습니다)";
+
+            Panel box = new Panel();
+            box.Dock = DockStyle.Fill;
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Padding = new Padding(Px(6));
+            content = new NoteEditor(baseFont, scale);
+            content.Dock = DockStyle.Fill;
+            box.Controls.Add(content);
+
+            FlowLayoutPanel rb = new FlowLayoutPanel();
+            rb.Dock = DockStyle.Bottom;
+            rb.Height = Px(40);
+            rb.FlowDirection = FlowDirection.RightToLeft;
+            rb.Padding = new Padding(0, Px(6), 0, 0);
+            Button close = SmallButton("닫기", 80);
+            close.DialogResult = DialogResult.Cancel;
+            saveBtn = SmallButton("저장", 80);
+            delBtn = SmallButton("삭제", 80);
+            saveBtn.Click += new EventHandler(Save_Click);
+            delBtn.Click += new EventHandler(Del_Click);
+            rb.Controls.Add(close);
+            rb.Controls.Add(saveBtn);
+            rb.Controls.Add(delBtn);
+            CancelButton = close;
+
+            right.Controls.Add(box);
+            right.Controls.Add(hint);
+            right.Controls.Add(top);
+            right.Controls.Add(rb);
+
+            Controls.Add(right);
+            Controls.Add(left);
+            Skin.Apply(this);
+            content.BackColor = ColorMap.Disp(Color.White);
+            box.BackColor = content.BackColor;
+
+            FillList(null);
+        }
+
+        // 창이 만들어진 뒤에 불러와야 서식이 그대로 보임
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (Snippets.Items.Count > 0) list.SelectedIndex = 0;
+            else StartNew();
+        }
+
+        Button SmallButton(string text, int w)
+        {
+            Button b = new Button();
+            b.Text = text;
+            b.Size = new Size(Px(w), Px(28));
+            b.Margin = new Padding(Px(2), 0, Px(2), 0);
+            return b;
+        }
+
+        void FillList(Snippet select)
+        {
+            list.BeginUpdate();
+            list.Items.Clear();
+            foreach (Snippet s in Snippets.Items) list.Items.Add(new SnippetRow(s));
+            list.EndUpdate();
+            if (select != null)
+                for (int i = 0; i < list.Items.Count; i++)
+                    if (((SnippetRow)list.Items[i]).S == select) { list.SelectedIndex = i; break; }
+        }
+
+        class SnippetRow
+        {
+            public Snippet S;
+            public SnippetRow(Snippet s) { S = s; }
+            public override string ToString() { return S.Name + (S.Key > 0 ? "   (Alt+" + S.Key + ")" : ""); }
+        }
+
+        void ShowSnippet(Snippet s)
+        {
+            editing = s;
+            nameBox.Text = s.Name;
+            keyBox.SelectedIndex = Math.Max(0, Math.Min(9, s.Key));
+            content.Loading = true;
+            content.Clear();
+            try
+            {
+                if (s.Rtf.Length > 0) content.Rtf = ColorMap.Dark ? ColorMap.MapColorTable(s.Rtf, true) : s.Rtf;
+            }
+            catch { }
+            if (ColorMap.Dark) content.FixTextColors(0, content.TextLength, false, 0);
+            content.Select(0, 0);
+            content.ClearUndo();
+            content.Loading = false;
+            content.Dirty = false;
+            delBtn.Enabled = Snippets.Items.Contains(s);
+        }
+
+        void StartNew()
+        {
+            list.SelectedIndex = -1;
+            Snippet s = new Snippet();
+            s.Name = "새 상용구";
+            s.Key = Snippets.FreeKey();
+            ShowSnippet(s);
+            nameBox.Focus();
+            nameBox.SelectAll();
+        }
+
+        void List_Selected(object sender, EventArgs e)
+        {
+            if (list.SelectedIndex < 0) return;
+            ShowSnippet(((SnippetRow)list.SelectedItem).S);
+        }
+
+        void New_Click(object sender, EventArgs e) { StartNew(); }
+
+        void Save_Click(object sender, EventArgs e)
+        {
+            string name = nameBox.Text.Trim();
+            if (name.Length == 0) { MessageBox.Show(this, "이름을 입력하세요.", "AHNNOTE"); nameBox.Focus(); return; }
+            if (content.TextLength == 0) { MessageBox.Show(this, "내용을 입력하세요.", "AHNNOTE"); content.Focus(); return; }
+            editing.Name = name;
+            string rtf = Snippets.TrimLastPar(content.Rtf);
+            if (ColorMap.Dark) rtf = ColorMap.MapColorTable(rtf, false);
+            editing.Rtf = rtf;
+            if (!Snippets.Items.Contains(editing)) Snippets.Items.Add(editing);
+            Snippets.SetKey(editing, keyBox.SelectedIndex);
+            Snippets.Save();
+            content.Dirty = false;
+            FillList(editing);
+            delBtn.Enabled = true;
+        }
+
+        void Del_Click(object sender, EventArgs e)
+        {
+            if (editing == null || !Snippets.Items.Contains(editing)) return;
+            if (MessageBox.Show(this, "'" + editing.Name + "' 상용구를 삭제할까요?", "AHNNOTE", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            int i = Snippets.Items.IndexOf(editing);
+            Snippets.Items.Remove(editing);
+            Snippets.Save();
+            FillList(null);
+            if (Snippets.Items.Count > 0) list.SelectedIndex = Math.Min(i, Snippets.Items.Count - 1);
+            else StartNew();
+        }
+
+        void MoveItem(int d)
+        {
+            int i = Snippets.Items.IndexOf(editing);
+            int j = i + d;
+            if (i < 0 || j < 0 || j >= Snippets.Items.Count) return;
+            Snippet t = Snippets.Items[i];
+            Snippets.Items[i] = Snippets.Items[j];
+            Snippets.Items[j] = t;
+            Snippets.Save();
+            FillList(editing);
+        }
+
+        void Up_Click(object sender, EventArgs e) { MoveItem(-1); }
+        void Down_Click(object sender, EventArgs e) { MoveItem(1); }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (content.Dirty && editing != null &&
+                MessageBox.Show(this, "고친 내용을 저장할까요?", "AHNNOTE", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                Save_Click(this, EventArgs.Empty);
+            base.OnFormClosing(e);
         }
     }
 
