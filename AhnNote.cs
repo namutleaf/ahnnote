@@ -1311,6 +1311,8 @@ namespace AhnNote
                     if (k == "dark") dark = (v == "1");
                     else if (k == "top") topMost = (v == "1");
                     else if (k == "molebest") int.TryParse(v, out moleBest);
+                    else if (k == "qrsize") int.TryParse(v, out QrForm.LastSize);
+                    else if (k == "ioslink" && v.StartsWith("https://")) QrForm.IosLink = v;
                     else if (k == "fore" || k == "hi")
                     {
                         int argb;
@@ -1328,7 +1330,8 @@ namespace AhnNote
         void SaveSettings()
         {
             string t = "dark=" + (dark ? "1" : "0") + "\r\n" + "top=" + (topMost ? "1" : "0") + "\r\n" + "molebest=" + moleBest + "\r\n"
-                + "fore=" + NoteEditor.RecentFore.ToArgb() + "\r\n" + "hi=" + NoteEditor.RecentHi.ToArgb() + "\r\n";
+                + "fore=" + NoteEditor.RecentFore.ToArgb() + "\r\n" + "hi=" + NoteEditor.RecentHi.ToArgb() + "\r\n"
+                + "qrsize=" + QrForm.LastSize + "\r\n" + "ioslink=" + QrForm.IosLink + "\r\n";
             try { File.WriteAllText(Path.Combine(dataDir, "_settings.txt"), t, Encoding.UTF8); }
             catch { }
         }
@@ -1840,7 +1843,8 @@ namespace AhnNote
                 Rectangle b = sn.WindowState == FormWindowState.Normal ? sn.Bounds : sn.RestoreBounds;
                 sb.Append(sn.Notebook).Append('\t').Append(sn.Page).Append('\t')
                   .Append(b.X).Append('\t').Append(b.Y).Append('\t').Append(b.Width).Append('\t').Append(b.Height).Append('\t')
-                  .Append(sn.Pinned ? "1" : "0").Append("\r\n");
+                  .Append(sn.Pinned ? "1" : "0").Append('\t')
+                  .Append(sn.NoteColor.IsEmpty ? 0 : sn.NoteColor.ToArgb()).Append("\r\n");
             }
             try { File.WriteAllText(Path.Combine(dataDir, "_stickies.txt"), sb.ToString(), Encoding.UTF8); } catch { }
         }
@@ -1864,6 +1868,8 @@ namespace AhnNote
                     if (w > 50 && h > 50) sn.Bounds = new Rectangle(x, y, w, h);
                     sn.KeepOnScreen();
                     sn.SetPinned(p[6] == "1");
+                    int nc;
+                    if (p.Length > 7 && int.TryParse(p[7], out nc) && nc != 0) { sn.NoteColor = Color.FromArgb(nc); sn.ApplyColors(); }
                     AddSticky(sn);
                     sn.Show();
                 }
@@ -1962,6 +1968,7 @@ namespace AhnNote
                 f.TopMost = TopMost;
                 f.ShowDialog(this);
             }
+            SaveSettings();   // 고른 양, 단축어 링크 기억
         }
 
         // ================= 캘린더 / 알림 =================
@@ -3330,11 +3337,20 @@ namespace AhnNote
         public bool Pinned = false;
         public bool AppClosing = false;
         public Color PageBg;
+        Color noteColor = Color.Empty;
+        public Color NoteColor { get { return noteColor; } set { noteColor = value; } }   // 포스트잇 전용 색 (비어 있으면 자동)
         public event EventHandler LayoutChangedByUser;
         public event EventHandler BackToMain;
         Panel bar, inner;
         Label nameLabel;
-        Button pinBtn, backBtn;
+        Button pinBtn, backBtn, colorBtn, closeBtn;
+        ContextMenuStrip colorMenu;
+        bool dragging = false;
+        Point dragMouse, dragForm;
+
+        static readonly Color[] NOTE_COLORS = { Color.FromArgb(255, 244, 160), Color.FromArgb(255, 205, 220), Color.FromArgb(200, 230, 255),
+            Color.FromArgb(215, 240, 190), Color.FromArgb(230, 215, 250), Color.FromArgb(255, 220, 180), Color.FromArgb(232, 232, 232), Color.White };
+        static readonly string[] NOTE_NAMES = { "노랑", "분홍", "하늘", "연두", "보라", "주황", "회색", "흰색" };
         Timer saveTimer;
         ToolTip tip;
         float S;
@@ -3351,7 +3367,8 @@ namespace AhnNote
             S = scale;
             Text = page;
             Font = new Font("Malgun Gothic", 9f);
-            FormBorderStyle = FormBorderStyle.SizableToolWindow;
+            FormBorderStyle = FormBorderStyle.None;     // 윈도우 제목 표시줄 숨김
+            Padding = new Padding(Px(3));               // 이 테두리를 끌어서 크기 조절
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             Size = new Size(Px(320), Px(320));
@@ -3369,13 +3386,39 @@ namespace AhnNote
             nameLabel.AutoEllipsis = true;
             nameLabel.Padding = new Padding(Px(6), 0, 0, 0);
             nameLabel.Text = nb + "  ›  " + page;
+            nameLabel.Cursor = Cursors.SizeAll;
+            colorBtn = BarButton(mdl ? "\uE790" : "색", "포스트잇 색");
+            colorBtn.Click += new EventHandler(ColorBtn_Click);
             pinBtn = BarButton(mdl ? "\uE718" : "핀", "항상 위에 고정");
             pinBtn.Click += new EventHandler(Pin_Click);
             backBtn = BarButton(mdl ? "\uE8A7" : "↩", "메인 창으로 돌려보내기 (포스트잇 닫기)");
             backBtn.Click += new EventHandler(Back_Click);
+            closeBtn = BarButton(mdl ? "\uE8BB" : "×", "포스트잇 닫기");
+            closeBtn.Click += new EventHandler(Close_Click);
             bar.Controls.Add(nameLabel);
-            bar.Controls.Add(backBtn);
+            bar.Controls.Add(colorBtn);
             bar.Controls.Add(pinBtn);
+            bar.Controls.Add(backBtn);
+            bar.Controls.Add(closeBtn);
+            // 위쪽 줄을 끌어서 옮기기
+            bar.MouseDown += new MouseEventHandler(Bar_MouseDown);
+            bar.MouseMove += new MouseEventHandler(Bar_MouseMove);
+            bar.MouseUp += new MouseEventHandler(Bar_MouseUp);
+            nameLabel.MouseDown += new MouseEventHandler(Bar_MouseDown);
+            nameLabel.MouseMove += new MouseEventHandler(Bar_MouseMove);
+            nameLabel.MouseUp += new MouseEventHandler(Bar_MouseUp);
+
+            colorMenu = new ContextMenuStrip();
+            for (int i = 0; i < NOTE_COLORS.Length; i++)
+            {
+                ToolStripMenuItem mi = new ToolStripMenuItem(NOTE_NAMES[i], Swatch(NOTE_COLORS[i]), new EventHandler(NoteColor_Click));
+                mi.Tag = NOTE_COLORS[i];
+                colorMenu.Items.Add(mi);
+            }
+            colorMenu.Items.Add(new ToolStripSeparator());
+            ToolStripMenuItem auto = new ToolStripMenuItem("기본 (페이지 배경색 따르기)", null, new EventHandler(NoteColor_Click));
+            auto.Tag = Color.Empty;
+            colorMenu.Items.Add(auto);
 
             inner = new Panel();
             inner.Dock = DockStyle.Fill;
@@ -3435,12 +3478,31 @@ namespace AhnNote
             tip.SetToolTip(pinBtn, on ? "고정 해제" : "항상 위에 고정");
         }
 
+        Bitmap Swatch(Color c)
+        {
+            int n = Px(16);
+            Bitmap b = new Bitmap(n, n);
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.Transparent);
+                using (SolidBrush br = new SolidBrush(c)) g.FillRectangle(br, 1, 1, n - 2, n - 2);
+                g.DrawRectangle(Pens.Gray, 1, 1, n - 3, n - 3);
+            }
+            return b;
+        }
+
+        // 다크 모드에서는 같은 색을 어둡게
+        static Color DarkTint(Color c)
+        {
+            return Color.FromArgb((int)(c.R * 0.28 + 30 * 0.72), (int)(c.G * 0.28 + 30 * 0.72), (int)(c.B * 0.28 + 32 * 0.72));
+        }
+
         public void ApplyColors()
         {
-            bool plain = PageBg.ToArgb() == Color.White.ToArgb();
-            Color d;
-            if (plain) d = Skin.Dark ? Color.FromArgb(62, 58, 36) : YELLOW;   // 기본 포스트잇 색
-            else d = ColorMap.Disp(PageBg);
+            Color light;
+            if (!NoteColor.IsEmpty) light = NoteColor;
+            else light = PageBg.ToArgb() == Color.White.ToArgb() ? YELLOW : PageBg;
+            Color d = Skin.Dark ? DarkTint(light) : light;
             Ed.BackColor = d;
             inner.BackColor = d;
             BackColor = d;
@@ -3448,10 +3510,15 @@ namespace AhnNote
             int k = Skin.Dark ? 18 : -22;
             bar.BackColor = Color.FromArgb(Clamp(d.R + k), Clamp(d.G + k), Clamp(d.B + k));
             nameLabel.ForeColor = Skin.Dark ? Color.FromArgb(200, 200, 200) : Color.FromArgb(90, 80, 40);
-            backBtn.BackColor = bar.BackColor;
-            backBtn.ForeColor = nameLabel.ForeColor;
-            backBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(Clamp(bar.BackColor.R + k), Clamp(bar.BackColor.G + k), Clamp(bar.BackColor.B + k));
-            pinBtn.FlatAppearance.MouseOverBackColor = backBtn.FlatAppearance.MouseOverBackColor;
+            Color hover = Color.FromArgb(Clamp(bar.BackColor.R + k), Clamp(bar.BackColor.G + k), Clamp(bar.BackColor.B + k));
+            foreach (Button b in new Button[] { backBtn, colorBtn, closeBtn })
+            {
+                b.BackColor = bar.BackColor;
+                b.ForeColor = nameLabel.ForeColor;
+                b.FlatAppearance.MouseOverBackColor = hover;
+            }
+            pinBtn.FlatAppearance.MouseOverBackColor = hover;
+            BackColor = hover;   // 바깥 테두리
             SetPinnedColorsOnly();
             Skin.TitleBar(this, Skin.Dark);
         }
@@ -3498,6 +3565,63 @@ namespace AhnNote
         void Back_Click(object sender, EventArgs e)
         {
             if (BackToMain != null) BackToMain(this, EventArgs.Empty);
+        }
+
+        void Close_Click(object sender, EventArgs e) { Close(); }
+
+        void ColorBtn_Click(object sender, EventArgs e)
+        {
+            colorMenu.Show(colorBtn, new Point(0, colorBtn.Height));
+        }
+
+        void NoteColor_Click(object sender, EventArgs e)
+        {
+            NoteColor = (Color)((ToolStripItem)sender).Tag;
+            ApplyColors();
+            if (LayoutChangedByUser != null) LayoutChangedByUser(this, EventArgs.Empty);
+        }
+
+        // ---------- 위쪽 줄을 끌어서 옮기기 ----------
+
+        void Bar_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            dragging = true;
+            dragMouse = Cursor.Position;
+            dragForm = Location;
+            ((Control)sender).Capture = true;
+        }
+
+        void Bar_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!dragging) return;
+            Point p = Cursor.Position;
+            Location = new Point(dragForm.X + p.X - dragMouse.X, dragForm.Y + p.Y - dragMouse.Y);
+        }
+
+        void Bar_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (!dragging) return;
+            dragging = false;
+            ((Control)sender).Capture = false;
+            if (LayoutChangedByUser != null) LayoutChangedByUser(this, EventArgs.Empty);
+        }
+
+        // ---------- 테두리를 끌어서 크기 조절 ----------
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_NCHITTEST = 0x84;
+            base.WndProc(ref m);
+            if (m.Msg != WM_NCHITTEST || (int)m.Result != 1) return;   // 1 = 안쪽
+            int lp = m.LParam.ToInt32();
+            Point p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+            int g = Px(6);
+            bool left = p.X < g, right = p.X >= ClientSize.Width - g, top = p.Y < g, bottom = p.Y >= ClientSize.Height - g;
+            int r = 0;
+            if (top && left) r = 13; else if (top && right) r = 14; else if (bottom && left) r = 16; else if (bottom && right) r = 17;
+            else if (left) r = 10; else if (right) r = 11; else if (top) r = 12; else if (bottom) r = 15;
+            if (r != 0) m.Result = (IntPtr)r;
         }
 
         protected override void OnResizeEnd(EventArgs e)
@@ -3894,7 +4018,20 @@ namespace AhnNote
         ComboBox sizeBox;
         Bitmap qrBmp;
         float S;
+        Button iosBtn, linkBtn;
+        bool installMode = false;
         static readonly int[] LIMIT = { 500, 1000, 2000 };   // QR 한 장에 담을 바이트
+
+        // 마지막으로 고른 양 (설정에 저장)
+        public static int LastSize = 1;
+        // 아이폰 단축어 공유 링크 (설정에서 바꿀 수 있음)
+        public const string DEFAULT_IOS_LINK = "https://www.icloud.com/shortcuts/5e838a57c9b245b5bdba42f4e72d77f5";
+        public static string IosLink = DEFAULT_IOS_LINK;
+
+        const string GUIDE = "안드로이드: 카메라나 구글 렌즈로 찍어서 글을 복사하세요.\n" +
+            "아이폰: 처음 한 번 [아이폰 단축어 설치]로 단축어를 추가한 뒤, 단축어를 실행해서 1장부터 차례로 찍고 다 찍으면 [취소]. 새 메모에 저장됩니다.";
+        const string INSTALL_GUIDE = "① 아이폰 카메라로 이 QR을 찍고 [단축어 추가]를 누르세요. (폰 인터넷 필요, 처음 한 번만)\n" +
+            "② 다음부터는 단축어 앱에서 방금 추가한 단축어를 실행 → [본문 QR로 돌아가기] 후 1장부터 차례로 찍기 → 다 찍으면 [취소].";
 
         int Px(int v) { return (int)(v * S); }
 
@@ -3908,8 +4045,8 @@ namespace AhnNote
             StartPosition = FormStartPosition.CenterParent;
             ShowInTaskbar = false;
             KeyPreview = true;
-            ClientSize = new Size(Px(520), Px(640));
-            MinimumSize = new Size(Px(360), Px(460));
+            ClientSize = new Size(Px(560), Px(700));
+            MinimumSize = new Size(Px(460), Px(520));
 
             view = new Panel();
             view.Dock = DockStyle.Fill;
@@ -3919,7 +4056,7 @@ namespace AhnNote
 
             Panel bottom = new Panel();
             bottom.Dock = DockStyle.Bottom;
-            bottom.Height = Px(92);
+            bottom.Height = Px(150);
             bottom.Padding = new Padding(Px(10), Px(6), Px(10), Px(6));
 
             prevBtn = new Button();
@@ -3941,12 +4078,20 @@ namespace AhnNote
             sizeBox = new ComboBox();
             sizeBox.DropDownStyle = ComboBoxStyle.DropDownList;
             sizeBox.Items.AddRange(new string[] { "적게 (잘 찍힘)", "보통", "많이 (촘촘함)" });
-            sizeBox.SelectedIndex = 1;
+            sizeBox.SelectedIndex = Math.Max(0, Math.Min(2, LastSize));
             sizeBox.SetBounds(Px(360), Px(11), Px(140), Px(24));
             sizeBox.SelectedIndexChanged += new EventHandler(Size_Changed);
             infoLabel = new Label();
             infoLabel.ForeColor = Color.Gray;
-            infoLabel.SetBounds(Px(10), Px(44), Px(490), Px(40));
+            infoLabel.SetBounds(Px(10), Px(44), Px(530), Px(64));
+            iosBtn = new Button();
+            iosBtn.Text = "아이폰 단축어 설치";
+            iosBtn.SetBounds(Px(10), Px(112), Px(170), Px(30));
+            iosBtn.Click += new EventHandler(Ios_Click);
+            linkBtn = new Button();
+            linkBtn.Text = "단축어 링크 바꾸기...";
+            linkBtn.SetBounds(Px(186), Px(112), Px(150), Px(30));
+            linkBtn.Click += new EventHandler(Link_Click);
 
             bottom.Controls.Add(prevBtn);
             bottom.Controls.Add(pageLabel);
@@ -3954,6 +4099,8 @@ namespace AhnNote
             bottom.Controls.Add(sl);
             bottom.Controls.Add(sizeBox);
             bottom.Controls.Add(infoLabel);
+            bottom.Controls.Add(iosBtn);
+            bottom.Controls.Add(linkBtn);
             Controls.Add(view);
             Controls.Add(bottom);
             Skin.Apply(this);
@@ -4006,13 +4153,43 @@ namespace AhnNote
             {
                 QrCode q = QrCode.Encode(Encoding.UTF8.GetBytes(parts[index]));
                 qrBmp = q.ToBitmap(1);
-                infoLabel.Text = "폰 카메라나 QR 앱으로 찍으세요. 서식은 빠지고 글자만 담깁니다.\n이 장: " + parts[index].Length + "자" + (parts.Count > 1 ? "   ← → 키로 넘기기" : "");
+                infoLabel.Text = "이 장: " + parts[index].Length + "자 (서식은 빠지고 글자만)" + (parts.Count > 1 ? "   ← → 키로 넘기기" : "") + "\n" + GUIDE;
             }
             catch (Exception ex) { infoLabel.Text = ex.Message; }
             pageLabel.Text = (index + 1) + " / " + parts.Count;
             prevBtn.Enabled = index > 0;
             nextBtn.Enabled = index < parts.Count - 1;
+            installMode = false;
+            iosBtn.Text = "아이폰 단축어 설치";
+            sizeBox.Enabled = true;
             view.Invalidate();
+        }
+
+        // 아이폰 단축어 설치 QR 보기 / 본문으로 돌아가기
+        void Ios_Click(object sender, EventArgs e)
+        {
+            if (installMode) { Show(index); return; }
+            if (qrBmp != null) { qrBmp.Dispose(); qrBmp = null; }
+            try { qrBmp = QrCode.Encode(Encoding.UTF8.GetBytes(IosLink)).ToBitmap(1); } catch { }
+            installMode = true;
+            pageLabel.Text = "단축어 설치";
+            prevBtn.Enabled = false;
+            nextBtn.Enabled = false;
+            sizeBox.Enabled = false;
+            iosBtn.Text = "본문 QR로 돌아가기";
+            infoLabel.Text = INSTALL_GUIDE;
+            view.Invalidate();
+        }
+
+        void Link_Click(object sender, EventArgs e)
+        {
+            string v = InputDialog.Ask(this, "아이폰 단축어 링크", "iCloud 단축어 공유 링크 (비우면 기본 링크):", IosLink);
+            if (v == null) return;
+            v = v.Trim();
+            if (v.Length == 0) v = DEFAULT_IOS_LINK;
+            if (!v.StartsWith("https://")) { MessageBox.Show(this, "https:// 로 시작하는 링크를 넣어 주세요.", "AHNNOTE"); return; }
+            IosLink = v;
+            if (installMode) { installMode = false; Ios_Click(sender, e); }
         }
 
         void View_Paint(object sender, PaintEventArgs e)
@@ -4033,6 +4210,7 @@ namespace AhnNote
 
         void Size_Changed(object sender, EventArgs e)
         {
+            LastSize = sizeBox.SelectedIndex;
             Split();
             Show(0);
         }
