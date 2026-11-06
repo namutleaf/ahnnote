@@ -114,6 +114,9 @@ namespace AhnNote
         Label lockLabel;
         Button lockShowBtn, lockBackBtn;
         int dragIndex = -1;
+        int dragFrom = -1;        // 끌기 시작한 페이지 위치
+        int dropMarker = -1;      // 놓을 자리 표시 (목록 안)
+        bool reorderNow = false;
         Point dragStart;
         string dragPage;
         bool detachNow = false;
@@ -672,6 +675,7 @@ namespace AhnNote
 
         void SaveTimer_Tick(object sender, EventArgs e)
         {
+            if (ed.Composing) return;   // 한글 조합 중에는 건드리지 않음
             if (dirty) SaveCurrent();
             UpdateStatus();
         }
@@ -685,6 +689,7 @@ namespace AhnNote
 
         void QuickTimer_Tick(object sender, EventArgs e)
         {
+            if (ed.Composing) return;   // 조합이 끝날 때까지 기다렸다가 다시 시도 (타이머는 계속 돎)
             quickTimer.Stop();
             if (dirty && !loading)
             {
@@ -927,6 +932,16 @@ namespace AhnNote
             }
             string name = lb.Items[e.Index].ToString();
             int right = e.Bounds.Right - Px(4);
+            if (lb == pgList && dropMarker >= 0)
+            {
+                // 끌어서 놓을 자리에 파란 줄
+                using (SolidBrush b = new SolidBrush(cAccent))
+                {
+                    if (dropMarker == e.Index) e.Graphics.FillRectangle(b, e.Bounds.X, e.Bounds.Y, e.Bounds.Width, Px(3));
+                    else if (dropMarker == e.Index + 1 && e.Index == lb.Items.Count - 1)
+                        e.Graphics.FillRectangle(b, e.Bounds.X, e.Bounds.Bottom - Px(3), e.Bounds.Width, Px(3));
+                }
+            }
             if (lb == pgList && curNotebook != null)
             {
                 if (IsFav(curNotebook, name))
@@ -1945,10 +1960,17 @@ namespace AhnNote
             if (Math.Abs(e.X - dragStart.X) < ds.Width * 2 && Math.Abs(e.Y - dragStart.Y) < ds.Height * 2) return;
             if (dragIndex >= pgOrder.Count) { dragIndex = -1; return; }
             dragPage = pgOrder[dragIndex];
+            dragFrom = dragIndex;
             dragIndex = -1;
             detachNow = false;
+            reorderNow = false;
+            dropMarker = -1;
             pgList.DoDragDrop(dragPage, DragDropEffects.Move);
+            int target = dropMarker;
+            dropMarker = -1;
+            pgList.Invalidate();
             if (detachNow && dragPage != null && curNotebook != null) OpenSticky(curNotebook, dragPage, true, detachAt);
+            else if (reorderNow) ReorderPage(dragFrom, target);
         }
 
         void PgList_QueryDrag(object sender, QueryContinueDragEventArgs e)
@@ -1959,13 +1981,46 @@ namespace AhnNote
                 e.Action = DragAction.Cancel;
                 Point p = Control.MousePosition;
                 if (!Bounds.Contains(p)) { detachNow = true; detachAt = p; }
+                else if (pgList.RectangleToScreen(pgList.ClientRectangle).Contains(p)) { dropMarker = DropIndexAt(p); reorderNow = true; }
             }
         }
 
         void PgList_GiveFeedback(object sender, GiveFeedbackEventArgs e)
         {
             e.UseDefaultCursors = false;
-            Cursor.Current = Bounds.Contains(Control.MousePosition) ? Cursors.No : Cursors.Hand;
+            Point p = Control.MousePosition;
+            int marker = -1;
+            if (pgList.RectangleToScreen(pgList.ClientRectangle).Contains(p))
+            {
+                marker = DropIndexAt(p);
+                Cursor.Current = Cursors.Default;      // 목록 안: 순서 바꾸기
+            }
+            else Cursor.Current = Bounds.Contains(p) ? Cursors.No : Cursors.Hand;   // 창 밖: 포스트잇
+            if (marker != dropMarker) { dropMarker = marker; pgList.Invalidate(); }
+        }
+
+        // 마우스 위치 → 끼워 넣을 자리 (0 ~ 페이지 수)
+        int DropIndexAt(Point screen)
+        {
+            Point c = pgList.PointToClient(screen);
+            int i = pgList.IndexFromPoint(c);
+            if (i < 0) return pgOrder.Count;
+            Rectangle r = pgList.GetItemRectangle(i);
+            return c.Y > r.Y + r.Height / 2 ? i + 1 : i;
+        }
+
+        // from 위치의 페이지를 pos 자리(그 앞)로 옮기기
+        void ReorderPage(int from, int pos)
+        {
+            if (from < 0 || from >= pgOrder.Count || pos < 0) return;
+            if (pos > pgOrder.Count) pos = pgOrder.Count;
+            if (pos > from) pos--;
+            if (pos == from) return;
+            string pg = pgOrder[from];
+            pgOrder.RemoveAt(from);
+            pgOrder.Insert(pos, pg);
+            SavePgMeta();
+            FillList(pgList, pgOrder, curPage);
         }
 
         // ================= QR 로 보기 =================
@@ -2469,6 +2524,22 @@ namespace AhnNote
         }
 
         protected override void OnTextChanged(EventArgs e) { MarkDirty(); base.OnTextChanged(e); }
+
+        // 한글 조합 중인지 (조합 중에는 자동 저장을 미뤄서 글자가 깨지지 않게)
+        public bool Composing = false;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x010D) Composing = true;         // WM_IME_STARTCOMPOSITION
+            else if (m.Msg == 0x010E) Composing = false;   // WM_IME_ENDCOMPOSITION
+            base.WndProc(ref m);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            Composing = false;
+            base.OnLostFocus(e);
+        }
         protected override void OnKeyDown(KeyEventArgs e) { Ed_KeyDown(this, e); base.OnKeyDown(e); }
         protected override void OnKeyPress(KeyPressEventArgs e) { Ed_KeyPress(this, e); base.OnKeyPress(e); }
         protected override void OnMouseUp(MouseEventArgs e) { Ed_MouseUp(this, e); base.OnMouseUp(e); }
@@ -3585,7 +3656,7 @@ namespace AhnNote
             Location = new Point(wa.Right - Width - Px(40), wa.Top + Px(80));
         }
 
-        void SaveTimer_Tick(object sender, EventArgs e) { SaveNow(); }
+        void SaveTimer_Tick(object sender, EventArgs e) { if (!Ed.Composing) SaveNow(); }
 
         void Ed_UserChanged(object sender, EventArgs e)
         {
@@ -3595,6 +3666,7 @@ namespace AhnNote
 
         void QuickTimer_Tick(object sender, EventArgs e)
         {
+            if (Ed.Composing) return;
             quickTimer.Stop();
             SaveNow();
         }
